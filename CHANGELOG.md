@@ -82,6 +82,20 @@
   - `timeout 300s bash -ic 'cd /home/xiemingjie/dev/deep_research_agent && set -a && source .env && set +a && proxy_on && UV_CACHE_DIR=/tmp/uv-cache uv run deep-research-agent-eval \"<prompt>\" --skill research-todo --max-turns 10'`
   - `timeout 240s bash -ic 'cd /home/xiemingjie/dev/deep_research_agent && set -a && source .env && set +a && proxy_on && UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/smoke_tool.py jina_reader --url https://example.com'`
 
+### Jina 失败回退到 Firecrawl
+
+- 在 `jina_reader` 中新增失败回退路径：
+  - 当 Jina 请求异常（例如 SSL / 连接错误）且配置了 `FIRECRAWL_API_KEY` 时，自动调用 Firecrawl `/v2/scrape` 获取 Markdown
+  - 返回结构新增 `provider` 字段（`jina` 或 `firecrawl_fallback`），并在回退时记录 `fallback_reason`
+- `jina_reader` 工具描述同步更新，明确回退逻辑
+- 新增测试：
+  - `tests/test_tools.py::test_jina_reader_falls_back_to_firecrawl_when_jina_fails`
+
+### 本次验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_tools.py -q`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q`：`35 passed, 6 skipped`
+
 ## 2026-04-22 (by Kimi Code CLI) — Real API 集成测试
 
 ### 新增 `tests/test_tools_real_api.py`

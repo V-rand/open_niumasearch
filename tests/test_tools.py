@@ -148,6 +148,52 @@ def test_builtin_toolset_includes_mineru_guidance(tmp_path, is_fast_mode: bool) 
     assert "mineru_parse_url" in tools
     assert "PDF" in tools["mineru_parse_url"]["description"]
     assert "HTML" in tools["jina_reader"]["description"]
+    assert "Firecrawl" in tools["jina_reader"]["description"]
+
+
+def test_jina_reader_falls_back_to_firecrawl_when_jina_fails(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    monkeypatch.setenv("JINA_API_KEY", "dummy-jina")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "dummy-firecrawl")
+
+    class _FallbackHttpClient:
+        def post(self, url: str, json: dict | None = None, headers: dict | None = None):  # type: ignore[no-untyped-def]
+            if url == "https://r.jina.ai/":
+                raise RuntimeError("jina ssl failed")
+            if url == "https://api.firecrawl.dev/v2/scrape":
+                assert headers is not None
+                assert headers["Authorization"] == "Bearer dummy-firecrawl"
+                assert json is not None
+                assert json["formats"] == ["markdown"]
+                return _FakeResponse(
+                    data={
+                        "success": True,
+                        "data": {
+                            "markdown": "# Firecrawl Content\n\nok",
+                            "metadata": {"title": "Example Domain"},
+                            "links": ["https://example.com"],
+                            "images": [],
+                        },
+                    }
+                )
+            raise AssertionError(f"Unexpected URL {url}")
+
+    registry = build_builtin_tools(workspace_root=tmp_path, http_client=_FallbackHttpClient())
+    result = registry.invoke(
+        "jina_reader",
+        {
+            "url": "https://example.com",
+            "return_format": "markdown",
+        },
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["provider"] == "firecrawl_fallback"
+    assert "Firecrawl Content" in payload["content"]
+    assert payload["fallback_reason"].startswith("RuntimeError:")
 
 
 def test_web_search_uses_raw_query_without_runtime_rewrite(tmp_path, monkeypatch, is_fast_mode: bool) -> None:

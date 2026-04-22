@@ -320,16 +320,28 @@ def build_builtin_tools(
         if "viewport" in arguments and arguments["viewport"] is not None:
             body["viewport"] = arguments["viewport"]
 
-        response = http_client.post("https://r.jina.ai/", headers=headers, json=body)
-        response.raise_for_status()
-        data = response.json().get("data", {})
-        return {
-            "title": data.get("title"),
-            "url": arguments["url"],
-            "content": data.get("content", ""),
-            "links": data.get("links", []),
-            "images": data.get("images", []),
-        }
+        try:
+            response = http_client.post("https://r.jina.ai/", headers=headers, json=body)
+            response.raise_for_status()
+            data = response.json().get("data", {})
+            return {
+                "title": data.get("title"),
+                "url": arguments["url"],
+                "content": data.get("content", ""),
+                "links": data.get("links", []),
+                "images": data.get("images", []),
+                "provider": "jina",
+            }
+        except Exception as jina_exc:
+            firecrawl_key = os.getenv("FIRECRAWL_API_KEY")
+            if not firecrawl_key:
+                raise jina_exc
+            return _firecrawl_scrape_fallback(
+                url=arguments["url"],
+                firecrawl_api_key=firecrawl_key,
+                http_client=http_client,
+                jina_error=jina_exc,
+            )
 
     def mineru_parse_url(arguments: dict[str, Any]) -> dict[str, Any]:
         mode = arguments.get("mode", "lightweight")
@@ -523,7 +535,7 @@ def build_builtin_tools(
     registry.register(
         ToolDefinition(
             name="jina_reader",
-            description="Read and extract an HTML web page with Jina Reader. Prefer this for normal web pages, not PDF/doc/ppt/image files. Use proxy-enabled shell when the network blocks jina.",
+            description="Read and extract an HTML web page with Jina Reader. Prefer this for normal web pages, not PDF/doc/ppt/image files. Use proxy-enabled shell when the network blocks jina. If Jina fails and FIRECRAWL_API_KEY is configured, the tool falls back to Firecrawl scrape.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -934,3 +946,38 @@ def _has_closure_field(lines: list[str], cn_key: str, en_key: str) -> bool:
         if f"{en_key}:" in normalized:
             return True
     return False
+
+
+def _firecrawl_scrape_fallback(
+    *,
+    url: str,
+    firecrawl_api_key: str,
+    http_client: httpx.Client,
+    jina_error: Exception,
+) -> dict[str, Any]:
+    response = http_client.post(
+        "https://api.firecrawl.dev/v2/scrape",
+        headers={
+            "Authorization": f"Bearer {firecrawl_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "url": url,
+            "formats": ["markdown"],
+            "onlyMainContent": True,
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data", payload)
+    content = data.get("markdown") or ""
+    title = data.get("metadata", {}).get("title") or data.get("title")
+    return {
+        "title": title,
+        "url": url,
+        "content": content,
+        "links": data.get("links", []),
+        "images": data.get("images", []),
+        "provider": "firecrawl_fallback",
+        "fallback_reason": f"{type(jina_error).__name__}: {jina_error}",
+    }
