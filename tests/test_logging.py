@@ -28,9 +28,8 @@ def test_logger_spills_large_payload_to_artifact(tmp_path, is_fast_mode: bool) -
 
     trace_path = logger.run_dir / "trace.md"
     trace_content = trace_path.read_text(encoding="utf-8")
-    assert "## Lifecycle" in trace_content
-    assert "### Event 1: tool_result" in trace_content
-    assert "**Tool Result**" in trace_content
+    # New diary-style trace: no "Lifecycle" heading, tool result shown inline
+    assert "📄 **Result** (`sample_tool`, ok)" in trace_content
     assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" in trace_content
     assert "### Payload" not in trace_content
     assert "timestamp:" not in trace_content
@@ -48,12 +47,15 @@ def test_trace_groups_events_by_turn(tmp_path, is_fast_mode: bool) -> None:
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
-    assert "## Lifecycle" in trace_content
+    assert "## 启动" in trace_content
     assert "## Turn 1" in trace_content
     assert "## Turn 2" in trace_content
-    assert "### Event 2: model_request" in trace_content
-    assert "### Event 3: model_response" in trace_content
-    assert "### Event 4: tool_result" in trace_content
+    # model_request is suppressed in trace to reduce noise
+    assert "### Event" not in trace_content
+    assert "💬 **Output**" in trace_content
+    assert "b" in trace_content
+    assert "📄 **Result**" in trace_content
+    assert "c" in trace_content
 
 
 def test_trace_adds_visual_sections_for_common_events(tmp_path, is_fast_mode: bool) -> None:
@@ -92,17 +94,16 @@ def test_trace_adds_visual_sections_for_common_events(tmp_path, is_fast_mode: bo
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
-    assert "**User Messages**" in trace_content
-    assert "**Available Tools**" in trace_content
-    assert "**Thinking**" in trace_content
-    assert "**Requested Tools**" in trace_content
-    assert "**Tool**" in trace_content
-    assert "**Tool Result**" in trace_content
+    # model_request suppressed; model_response shows thinking + tool request
+    assert "🤔 **Thinking**" in trace_content
     assert "Need to read a file first." in trace_content
-    assert "`fs_read`" in trace_content
+    assert "🛠️ **Tool**: `fs_read`" in trace_content
+    assert "path=\"a.md\"" in trace_content
+    assert "📄 **Result** (`fs_read`, ok)" in trace_content
+    assert "file body" in trace_content
 
 
-def test_trace_shows_system_prompt_path_not_content(tmp_path, is_fast_mode: bool) -> None:
+def test_trace_shows_run_start_summary(tmp_path, is_fast_mode: bool) -> None:
     if is_fast_mode:
         pass
 
@@ -120,12 +121,11 @@ def test_trace_shows_system_prompt_path_not_content(tmp_path, is_fast_mode: bool
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
-    assert "**System Prompt Path**" in trace_content
-    assert "`system_prompt.txt`" in trace_content
+    assert "## 启动" in trace_content
+    assert "**输入**: hello" in trace_content
+    assert "**配置**: max_turns=3" in trace_content
+    assert "**Skills**: skills/todo-list.md" in trace_content
     assert "system prompt body" not in trace_content
-    assert "**Skill Paths**" in trace_content
-    assert "`skills/todo-list.md`" in trace_content
-    assert "**Config**" in trace_content
 
 
 def test_trace_omits_system_message_body_from_model_request(tmp_path, is_fast_mode: bool) -> None:
@@ -149,8 +149,7 @@ def test_trace_omits_system_message_body_from_model_request(tmp_path, is_fast_mo
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
-    assert "**System Prompt Path**" in trace_content
-    assert "**User Messages**" in trace_content
+    # model_request is suppressed in trace
     assert "very long system prompt body" not in trace_content
     assert "**System Messages**" not in trace_content
 
@@ -161,29 +160,24 @@ def test_trace_renders_openai_style_assistant_tool_calls(tmp_path, is_fast_mode:
 
     logger = RunLogger(base_dir=tmp_path / "logs")
     logger.log_event(
-        event_type="model_request",
+        event_type="model_response",
         payload={
             "turn_index": 2,
-            "messages": [
+            "reasoning": "",
+            "content": "",
+            "tool_calls": [
                 {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {
-                                "name": "fs_write",
-                                "arguments": "{\"path\":\"demo.md\",\"content\":\"hello\"}",
-                            },
-                        }
-                    ],
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "fs_write",
+                        "arguments": '{"path":"demo.md","content":"hello"}',
+                    },
                 }
             ],
-            "tools": [],
         },
     )
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
-    assert "`fs_write`" in trace_content
+    assert "🛠️ **Tool**: `fs_write`" in trace_content
     assert "demo.md" in trace_content

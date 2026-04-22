@@ -11,14 +11,9 @@ from deep_research_agent.agent import AgentConfig, ReActAgent
 from deep_research_agent.dashscope_backend import DashScopeOpenAIBackend
 from deep_research_agent.logging import RunLogger
 from deep_research_agent.session import create_session
-from deep_research_agent.skills import compose_system_prompt, load_repo_skills
+from deep_research_agent.prompts import compose_system_prompt, get_system_prompt
+from deep_research_agent.skills import load_repo_skills
 from deep_research_agent.tools import build_builtin_tools
-
-
-DEFAULT_SYSTEM_PROMPT = """你是一个谨慎的 research agent。
-所有动作前先简短思考。
-优先使用最直接、最少的工具完成当前问题。
-工具结果不是最终答案，必须在观察后再决定下一步或给出 final answer。"""
 
 
 def run_eval_case(
@@ -26,7 +21,7 @@ def run_eval_case(
     user_input: str,
     sessions_dir: Path,
     session_id: str | None = None,
-    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    system_prompt: str | None = None,
     skill_names: list[str] | None = None,
     max_turns: int = 6,
     model_backend: Any | None = None,
@@ -38,9 +33,12 @@ def run_eval_case(
         session_id=session_id,
     )
     loaded_skills = load_repo_skills(skill_names or []) if skill_names else []
-    full_system_prompt = compose_system_prompt(system_prompt, loaded_skills)
-    backend = model_backend or DashScopeOpenAIBackend()
     tools = build_builtin_tools(workspace_root=session.workspace_dir, http_client=http_client)
+    base_prompt = system_prompt if system_prompt is not None else get_system_prompt()
+    full_system_prompt = compose_system_prompt(base_prompt, tools=tools.to_openai_tools())
+    for skill in loaded_skills:
+        full_system_prompt += f"\n\n## Skill: {skill.name}\n\n{skill.content.rstrip()}\n"
+    backend = model_backend or DashScopeOpenAIBackend()
     logger = RunLogger(base_dir=session.logs_dir)
     agent = ReActAgent(
         model_backend=backend,
@@ -97,16 +95,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    system_prompt = (
+    base_prompt = (
         Path(args.system_prompt_file).read_text(encoding="utf-8")
         if args.system_prompt_file
-        else DEFAULT_SYSTEM_PROMPT
+        else get_system_prompt()
     )
     payload = run_eval_case(
         user_input=args.user_input,
         sessions_dir=Path(args.sessions_dir).resolve(),
         session_id=args.session_id,
-        system_prompt=system_prompt,
+        system_prompt=base_prompt,
         skill_names=args.skill,
         max_turns=args.max_turns,
     )

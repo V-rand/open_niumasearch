@@ -7,14 +7,9 @@ from deep_research_agent.agent import AgentConfig, ReActAgent
 from deep_research_agent.dashscope_backend import DashScopeOpenAIBackend
 from deep_research_agent.logging import RunLogger
 from deep_research_agent.session import create_session
-from deep_research_agent.skills import compose_system_prompt, load_repo_skills
+from deep_research_agent.prompts import compose_system_prompt, get_system_prompt
+from deep_research_agent.skills import load_repo_skills
 from deep_research_agent.tools import build_builtin_tools
-
-
-DEFAULT_SYSTEM_PROMPT = """你是一个谨慎的 research agent。
-所有动作前先简短思考。
-优先使用最直接、最少的工具完成当前问题。
-工具结果不是最终答案，必须在观察后再决定下一步或给出 final answer。"""
 
 
 def main() -> None:
@@ -48,21 +43,23 @@ def main() -> None:
     args = parser.parse_args()
 
     sessions_dir = Path(args.sessions_dir).resolve()
-    base_system_prompt = (
-        Path(args.system_prompt_file).read_text(encoding="utf-8")
-        if args.system_prompt_file
-        else DEFAULT_SYSTEM_PROMPT
-    )
-    loaded_skills = load_repo_skills(args.skill) if args.skill else []
-    system_prompt = compose_system_prompt(base_system_prompt, loaded_skills)
     session = create_session(
         sessions_dir,
         user_input=args.user_input,
         session_id=args.session_id,
     )
+    base_system_prompt = (
+        Path(args.system_prompt_file).read_text(encoding="utf-8")
+        if args.system_prompt_file
+        else get_system_prompt()
+    )
+    loaded_skills = load_repo_skills(args.skill) if args.skill else []
+    tools = build_builtin_tools(workspace_root=session.workspace_dir)
+    system_prompt = compose_system_prompt(base_system_prompt, tools=tools.to_openai_tools())
+    for skill in loaded_skills:
+        system_prompt += f"\n\n## Skill: {skill.name}\n\n{skill.content.rstrip()}\n"
 
     backend = DashScopeOpenAIBackend()
-    tools = build_builtin_tools(workspace_root=session.workspace_dir)
     logger = RunLogger(base_dir=session.logs_dir)
     agent = ReActAgent(
         model_backend=backend,

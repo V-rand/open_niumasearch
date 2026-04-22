@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 
 class RunLogger:
@@ -124,264 +124,210 @@ class RunLogger:
                 }
             )
 
+    # ------------------------------------------------------------------
+    # Trace formatting — human-readable diary style
+    # ------------------------------------------------------------------
+
     def _append_trace(self, event: dict[str, Any]) -> None:
         payload = event["payload"]
         turn_index = payload.get("turn_index") if isinstance(payload, dict) else None
+        event_type = event["event_type"]
 
-        trace_lines: list[str] = []
-        if isinstance(turn_index, int):
-            if self._current_trace_turn != turn_index:
-                self._current_trace_turn = turn_index
-                trace_lines.extend([f"## Turn {turn_index}", ""])
-        else:
-            self._current_trace_turn = None
-            if not self._trace_lifecycle_started:
-                self._trace_lifecycle_started = True
-                trace_lines.extend(["## Lifecycle", ""])
+        lines: list[str] = []
 
-        trace_lines.extend(
-            [
-                f"### Event {self._event_counter}: {event['event_type']}",
-                "",
-            ]
-        )
-        trace_lines.extend(self._build_visual_sections(event["event_type"], payload))
-        if event.get("artifacts"):
-            trace_lines.extend(
-                [
-                    "",
-                    "### Full Text Copies",
-                ]
-            )
-            for item in event["artifacts"]:
-                trace_lines.append(
-                    f"- `{item['field_path']}` -> `{item['artifact_path']}` ({item['char_count']} chars)"
-                )
-        trace_lines.append("")
-        trace_lines.append("")
-        with self.trace_path.open("a", encoding="utf-8") as handle:
-            handle.write("\n".join(trace_lines))
+        # Lifecycle events (run_start, run_stop, or tool_result without turn)
+        if turn_index is None:
+            if event_type == "run_start":
+                lines.extend(self._trace_run_start(payload))
+            elif event_type == "run_stop":
+                lines.extend(self._trace_run_stop(payload))
+            elif event_type == "tool_result":
+                lines.extend(self._trace_tool_result(payload))
+            else:
+                lines.extend(self._trace_generic(event_type, payload))
+            self._write_lines(lines)
+            return
 
-    def _build_visual_sections(self, event_type: str, payload: dict[str, Any]) -> list[str]:
-        if not isinstance(payload, dict):
-            return []
-
-        sections: list[str] = []
-
-        if event_type == "run_start":
-            sections.extend(self._text_section("Input", payload.get("user_input")))
-            sections.extend(self._compact_config_section(payload.get("config")))
-            sections.extend(self._reference_section("System Prompt Path", payload.get("system_prompt_path")))
-            sections.extend(self._path_list_section("Skill Paths", payload.get("skill_paths")))
-            return sections
-
-        if event_type == "run_stop":
-            sections.extend(self._inline_value("Stop", payload.get("stop_reason")))
-            if payload.get("turn_index") is not None:
-                sections.append(f"- finished at turn: `{payload['turn_index']}`")
-                sections.append("")
-            return sections
+        # Turn-level events
+        if self._current_trace_turn != turn_index:
+            self._current_trace_turn = turn_index
+            summary = self._turn_summary_from_payload(payload, event_type)
+            lines.append(f"\n## Turn {turn_index} — {summary}\n")
 
         if event_type == "model_request":
-            sections.extend(self._reference_section("System Prompt Path", payload.get("system_prompt_path")))
-            sections.extend(self._path_list_section("Skill Paths", payload.get("skill_paths")))
-            sections.extend(self._message_sections(payload.get("messages")))
-            sections.extend(self._tool_catalog_sections(payload.get("tools")))
-            return sections
+            # model_request is mostly redundant with model_response + tool_result;
+            # skip it in trace to reduce noise, but keep in events.jsonl.
+            pass
+        elif event_type == "model_response":
+            lines.extend(self._trace_model_response(payload))
+        elif event_type == "tool_result":
+            lines.extend(self._trace_tool_result(payload))
+        elif event_type == "run_stop":
+            # run_stop is already rendered at the end of the trace; skip here.
+            pass
+        else:
+            lines.extend(self._trace_generic(event_type, payload))
 
+        self._write_lines(lines)
+
+    def _write_lines(self, lines: list[str]) -> None:
+        if not lines:
+            return
+        with self.trace_path.open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+
+    # ------------------------------------------------------------------
+    # Turn summary extraction
+    # ------------------------------------------------------------------
+
+    def _turn_summary_from_payload(self, payload: dict[str, Any], event_type: str) -> str:
+        """Generate a one-line summary for a turn heading."""
         if event_type == "model_response":
-            sections.extend(self._text_section("Thinking", payload.get("reasoning")))
-            sections.extend(self._text_section("Output", payload.get("content")))
-            sections.extend(self._tool_call_sections(payload.get("tool_calls")))
-            return sections
-
-        if event_type == "tool_result":
-            sections.extend(
-                self._compact_tool_result_section(
-                    tool_name=payload.get("tool_name"),
-                    is_error=bool(payload.get("is_error")),
-                    content=payload.get("content"),
-                    metadata=payload.get("metadata"),
-                )
-            )
-            metadata = payload.get("metadata")
-            if metadata not in ({}, None):
-                sections.extend(self._text_section("Tool Metadata", self._render_value(metadata)))
-            return sections
-
-        sections.extend(self._text_section("Details", self._render_value(payload)))
-        return sections
-
-    def _text_section(self, title: str, value: Any) -> list[str]:
-        if value is None or value == "":
-            return []
-        return [
-            f"**{title}**",
-            "```text",
-            self._render_value(value),
-            "```",
-            "",
-        ]
-
-    def _inline_value(self, title: str, value: Any) -> list[str]:
-        if value is None or value == "":
-            return []
-        return [f"**{title}**", f"- {self._render_inline(value)}", ""]
-
-    def _reference_section(self, title: str, value: Any) -> list[str]:
-        if value is None or value == "":
-            return []
-        return [f"**{title}**", f"- `{value}`", ""]
-
-    def _path_list_section(self, title: str, value: Any) -> list[str]:
-        if not isinstance(value, list) or not value:
-            return []
-        lines = [f"**{title}**"]
-        for item in value:
-            lines.append(f"- `{item}`")
-        lines.append("")
-        return lines
-
-    def _compact_config_section(self, value: Any) -> list[str]:
-        if not isinstance(value, dict) or not value:
-            return []
-        lines = ["**Config**"]
-        for key, item in value.items():
-            lines.append(f"- {key}: `{item}`")
-        lines.append("")
-        return lines
-
-    def _message_sections(self, messages: Any) -> list[str]:
-        if not isinstance(messages, list):
-            return []
-
-        sections: list[str] = []
-        role_groups: dict[str, list[Any]] = {
-            "system": [],
-            "user": [],
-            "assistant": [],
-            "tool": [],
-        }
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            role = message.get("role", "unknown")
-            role_groups.setdefault(str(role), []).append(message)
-
-        for role in ["user", "assistant", "tool"]:
-            grouped = role_groups.get(role)
-            if grouped:
-                label = role.replace("_", " ").title()
-                sections.extend(self._role_message_section(label, grouped))
-        return sections
-
-    def _tool_catalog_sections(self, tools: Any) -> list[str]:
-        if not isinstance(tools, list):
-            return []
-
-        summarized_tools: list[str] = []
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            function = tool.get("function")
-            if not isinstance(function, dict):
-                continue
-            name = function.get("name") or "unknown_tool"
-            description = function.get("description") or ""
-            summarized_tools.append(f"- `{name}`: {description}".rstrip())
-
-        if not summarized_tools:
-            return []
-
-        return ["**Available Tools**", *summarized_tools, ""]
-
-    def _role_message_section(self, title: str, messages: list[Any]) -> list[str]:
-        lines = [f"**{title} Messages**"]
-        for index, message in enumerate(messages, start=1):
-            if not isinstance(message, dict):
-                continue
-            lines.append(f"{index}.")
-            content = message.get("content")
-            if content not in (None, ""):
-                lines.extend(["```text", self._render_value(content), "```"])
-            tool_calls = message.get("tool_calls")
+            tool_calls = payload.get("tool_calls")
+            content = payload.get("content") or ""
+            reasoning = payload.get("reasoning") or ""
             if tool_calls:
-                lines.append("Requested tool calls:")
-                for tool_line in self._tool_call_lines(tool_calls):
-                    lines.append(tool_line)
+                names = [self._tool_name_from_call(tc) for tc in tool_calls if isinstance(tc, dict)]
+                return f"调用工具: {', '.join(names)}"
+            if content:
+                # Take first ~30 chars of content as hint
+                hint = content.strip().replace("\n", " ")[:40]
+                return f"输出回复: {hint}..." if len(content) > 40 else f"输出回复: {hint}"
+            if reasoning:
+                hint = reasoning.strip().replace("\n", " ")[:40]
+                return f"思考中: {hint}..."
+            return "模型响应"
+        if event_type == "tool_result":
+            name = payload.get("tool_name") or "unknown"
+            return f"工具结果: {name}"
+        return event_type.replace("_", " ")
+
+    def _tool_name_from_call(self, tool_call: dict[str, Any]) -> str:
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            return function.get("name") or "unknown"
+        return tool_call.get("name") or "unknown"
+
+    # ------------------------------------------------------------------
+    # Section formatters
+    # ------------------------------------------------------------------
+
+    def _trace_run_start(self, payload: dict[str, Any]) -> list[str]:
+        lines = ["## 启动\n"]
+        user_input = payload.get("user_input")
+        if user_input:
+            lines.append(f"**输入**: {user_input}\n")
+        config = payload.get("config")
+        if isinstance(config, dict):
+            parts = [f"{k}={v}" for k, v in config.items()]
+            lines.append(f"**配置**: {', '.join(parts)}\n")
+        skills = payload.get("skill_paths")
+        if skills:
+            lines.append(f"**Skills**: {', '.join(str(s) for s in skills)}\n")
+        return lines
+
+    def _trace_run_stop(self, payload: dict[str, Any]) -> list[str]:
+        lines = ["\n## 结束\n"]
+        stop_reason = payload.get("stop_reason")
+        turn_index = payload.get("turn_index")
+        if stop_reason:
+            lines.append(f"**停止原因**: {stop_reason}")
+        if turn_index is not None:
+            lines.append(f"**总轮数**: {turn_index}")
         lines.append("")
         return lines
 
-    def _tool_call_sections(self, tool_calls: Any) -> list[str]:
-        if not tool_calls:
-            return []
-        lines = ["**Requested Tools**"]
-        lines.extend(self._tool_call_lines(tool_calls))
-        lines.append("")
-        return lines
-
-    def _tool_call_lines(self, tool_calls: Any) -> list[str]:
-        if not isinstance(tool_calls, list):
-            return []
+    def _trace_model_response(self, payload: dict[str, Any]) -> list[str]:
         lines: list[str] = []
-        for index, tool_call in enumerate(tool_calls, start=1):
-            if not isinstance(tool_call, dict):
-                continue
-            function_payload = tool_call.get("function")
-            if isinstance(function_payload, dict):
-                name = function_payload.get("name") or tool_call.get("name") or "unknown_tool"
-                arguments = function_payload.get("arguments", tool_call.get("arguments"))
-            else:
-                name = tool_call.get("name") or "unknown_tool"
-                arguments = tool_call.get("arguments")
-            lines.append(f"{index}. `{name}`")
-            if arguments not in (None, {}, []):
-                rendered = self._render_arguments(arguments)
-                for line in rendered:
-                    lines.append(f"   {line}")
+        reasoning = payload.get("reasoning")
+        content = payload.get("content")
+        tool_calls = payload.get("tool_calls")
+
+        if reasoning:
+            lines.append(f"🤔 **Thinking**")
+            lines.append(f"> {reasoning.strip().replace(chr(10), chr(10) + '> ')}\n")
+
+        if content:
+            lines.append(f"💬 **Output**")
+            lines.append(f"{content.strip()}\n")
+
+        if tool_calls:
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                name = self._tool_name_from_call(tc)
+                function = tc.get("function")
+                args = function.get("arguments") if isinstance(function, dict) else tc.get("arguments")
+                args_str = self._inline_args(args)
+                lines.append(f"🛠️ **Tool**: `{name}` — {args_str}\n")
+
         return lines
 
-    def _render_arguments(self, arguments: Any) -> list[str]:
-        if isinstance(arguments, dict):
-            lines: list[str] = []
-            for key, value in arguments.items():
-                if isinstance(value, (dict, list)):
-                    lines.append(f"- {key}:")
-                    for nested in self._indent_block(self._render_value(value).splitlines()):
-                        lines.append(nested)
-                elif isinstance(value, str) and "\n" in value:
-                    lines.append(f"- {key}:")
-                    lines.append("  ```text")
-                    for nested in value.splitlines():
-                        lines.append(f"  {nested}")
-                    lines.append("  ```")
-                else:
-                    lines.append(f"- {key}: {self._render_inline(value)}")
-            return lines
-        return [f"- arguments: {self._render_inline(arguments)}"]
+    def _trace_tool_result(self, payload: dict[str, Any]) -> list[str]:
+        tool_name = payload.get("tool_name") or "unknown"
+        is_error = bool(payload.get("is_error"))
+        content = payload.get("content")
+        metadata = payload.get("metadata")
 
-    def _tool_result_section(self, content: Any) -> list[str]:
-        if content is None or content == "":
-            return []
-        parsed = self._try_parse_json_string(content)
-        rendered = self._render_value(parsed if parsed is not None else content)
-        return ["**Tool Result**", "```text", rendered, "```", ""]
+        emoji = "❌" if is_error else "📄"
+        status = "error" if is_error else "ok"
 
-    def _compact_tool_result_section(
-        self,
-        *,
-        tool_name: Any,
-        is_error: bool,
-        content: Any,
-        metadata: Any,
-    ) -> list[str]:
-        lines = ["**Tool**"]
-        if tool_name:
-            lines.append(f"- used `{tool_name}`")
-        lines.append(f"- status: `{'error' if is_error else 'ok'}`")
+        lines = [f"{emoji} **Result** (`{tool_name}`, {status})"]
+
+        # Compact content preview
+        if content:
+            preview = self._compact_preview(content, max_lines=8)
+            lines.append(preview)
+
+        # Compact metadata
+        if metadata and metadata not in ({}, None):
+            meta_preview = self._compact_preview(self._render_value(metadata), max_lines=3)
+            lines.append(f"_metadata_: {meta_preview}")
+
         lines.append("")
-        lines.extend(self._tool_result_section(content))
         return lines
+
+    def _trace_generic(self, event_type: str, payload: dict[str, Any]) -> list[str]:
+        return [f"**{event_type}**", f"{self._compact_preview(self._render_value(payload), max_lines=5)}", ""]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _inline_args(self, args: Any) -> str:
+        """Render tool arguments as a compact inline string."""
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                return args[:100]
+        if isinstance(args, dict):
+            parts: list[str] = []
+            for k, v in args.items():
+                if isinstance(v, str):
+                    v_str = v if len(v) < 60 else v[:57] + "..."
+                    parts.append(f'{k}="{v_str}"')
+                else:
+                    v_str = json.dumps(v, ensure_ascii=False)
+                    if len(v_str) > 60:
+                        v_str = v_str[:57] + "..."
+                    parts.append(f"{k}={v_str}")
+            return ", ".join(parts)
+        return str(args)[:100]
+
+    def _compact_preview(self, text: str, max_lines: int = 8) -> str:
+        """Return full content in a code block; only truncate truly huge payloads."""
+        if not text:
+            return ""
+        # Always show full text for thinking, output, and tool results.
+        # Only truncate if it exceeds the artifact spillover threshold.
+        if len(text) > self.artifact_char_threshold:
+            lines = text.strip().splitlines()
+            preview_lines = lines[:max_lines]
+            preview = "\n".join(preview_lines)
+            preview += f"\n... ({len(lines) - max_lines} more lines, {len(text)} chars total — see events.jsonl or artifacts for full text)"
+            return "```text\n" + preview + "\n```"
+        return "```text\n" + text.strip() + "\n```"
 
     def _render_value(self, value: Any) -> str:
         if isinstance(value, str):

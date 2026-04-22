@@ -2,6 +2,27 @@
 
 ## 2026-04-22 (by Kimi Code CLI)
 
+### System Prompt 管理重构
+
+- **新建 `src/deep_research_agent/prompts.py`**：统一管理全局 system prompt 和工具目录生成
+  - `get_system_prompt()`：支持从 `AGENT_SYSTEM_PROMPT_FILE` 环境变量或 `prompts/system.md` 文件加载
+  - `build_tool_catalog()`：将 OpenAI tools 格式化为 Markdown 目录，注入 system prompt
+  - `compose_system_prompt()`：组装最终 system prompt，替换 `{tool_catalog}` 占位符
+- **新建 `prompts/system.md`**：全局 system prompt 模板文件，包含 `{tool_catalog}` 占位符
+- **移除硬编码 prompt**：`cli.py` 和 `eval.py` 不再各自维护 `DEFAULT_SYSTEM_PROMPT`，统一从 `prompts.py` 导入
+- **工具目录注入**：模型现在在 system prompt 中就能看到完整的工具清单、参数说明和使用策略
+
+### Trace 可读性优化
+
+- **日记风格格式**：trace.md 从"调试日志"改为"运行日记"
+- **Turn 标题带摘要**：`## Turn N — 调用工具: web_search, jina_reader`
+- **Emoji 区分角色**：🤔 Thinking / 💬 Output / 🛠️ Tool / 📄 Result / ❌ Error
+- **压缩冗余信息**：
+  - 去掉 `### Event N: type` 小标题
+  - model_request 事件在 trace 中隐藏（保留在 events.jsonl）
+  - 工具参数用单行内联格式
+- **完整内容保留**：thinking、output、tool result 全部显示，仅超过 spillover 阈值时才截断
+
 ### Skills 重构
 
 - **拆分 TODO skills**：将原来的 `skills/todo-list.md` 拆分为两个独立 skill：

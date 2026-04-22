@@ -32,6 +32,7 @@ def load_repo_skills(skill_names: list[str], *, skills_root: Path | None = None)
 
 
 def compose_system_prompt(base_prompt: str, skills: list[SkillDefinition]) -> str:
+    """Append skill contents to base prompt. Deprecated: use prompts.py compose_system_prompt instead."""
     if not skills:
         return base_prompt
 
