@@ -67,6 +67,21 @@
 - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q`：`32 passed, 6 skipped`
 - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q`（回退后复验）：`34 passed, 6 skipped`
 
+### 真实运行失败模式留痕（代理与网络）
+
+- 失败现象 1（Jina 直连）：
+  - `jina_reader` 报错 `SSL: CERTIFICATE_VERIFY_FAILED ... r.jina.ai`
+  - 触发场景：未启用代理时执行真实 eval
+- 失败现象 2（沙箱网络）：
+  - `openai.APIConnectionError: Connection error` / `[Errno 1] Operation not permitted`
+  - 触发场景：在受限沙箱中直接跑真实模型调用
+- 已确认可行路径：
+  - 使用交互 shell + 代理：`bash -ic '... && proxy_on && ...'`
+  - 若仍因沙箱网络失败，需要提权网络执行（outside sandbox）
+- 可复用命令模板：
+  - `timeout 300s bash -ic 'cd /home/xiemingjie/dev/deep_research_agent && set -a && source .env && set +a && proxy_on && UV_CACHE_DIR=/tmp/uv-cache uv run deep-research-agent-eval \"<prompt>\" --skill research-todo --max-turns 10'`
+  - `timeout 240s bash -ic 'cd /home/xiemingjie/dev/deep_research_agent && set -a && source .env && set +a && proxy_on && UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/smoke_tool.py jina_reader --url https://example.com'`
+
 ## 2026-04-22 (by Kimi Code CLI) — Real API 集成测试
 
 ### 新增 `tests/test_tools_real_api.py`
