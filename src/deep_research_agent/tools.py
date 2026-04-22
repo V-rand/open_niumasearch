@@ -484,7 +484,7 @@ def build_builtin_tools(
     registry.register(
         ToolDefinition(
             name="web_search",
-            description="Search the web with Tavily. Start broad, then narrow if needed.",
+            description="Search the web with Tavily. Returns a list of results, each containing title, URL, and a content snippet (summary, not full text). For key claims that need verification or evidence, use jina_reader or pdf_read_url to read the full page content. Start broad, then narrow if needed.",
             parameters={
                 "type": "object",
                 "properties": {
