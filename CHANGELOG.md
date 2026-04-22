@@ -96,6 +96,16 @@
 - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_tools.py -q`：通过
 - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q`：`35 passed, 6 skipped`
 
+### 固化真实运行前网络预检流程
+
+- 新增 `scripts/preflight_network.py`：
+  - 检查关键环境变量是否存在（掩码打印，不输出明文）
+  - 检查 DashScope/Jina/Tavily 连通性
+  - 预检失败直接返回非 0，阻止继续 real eval
+- `README.md` 新增固定流程：
+  - 先 `preflight_network.py`
+  - 通过后再执行 `deep-research-agent-eval`
+
 ## 2026-04-22 (by Kimi Code CLI) — Real API 集成测试
 
 ### 新增 `tests/test_tools_real_api.py`

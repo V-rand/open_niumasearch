@@ -13,6 +13,14 @@ Minimal harness for a deep research agent with a ReAct loop, real tool integrati
 
 ## Real Run Notes (China network)
 
+- Always run network preflight before real eval:
+
+```bash
+timeout 120s bash -ic 'cd /home/xiemingjie/dev/deep_research_agent && set -a && source .env && set +a && proxy_on && UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/preflight_network.py'
+```
+
+- If preflight fails, do not run real eval yet.
+
 - If `jina_reader` fails with SSL/certificate errors, run with proxy enabled in an interactive shell:
 
 ```bash
@@ -22,7 +30,7 @@ timeout 240s bash -ic 'cd /home/xiemingjie/dev/deep_research_agent && set -a && 
 - For real eval runs, use the same pattern:
 
 ```bash
-timeout 300s bash -ic 'cd /home/xiemingjie/dev/deep_research_agent && set -a && source .env && set +a && proxy_on && UV_CACHE_DIR=/tmp/uv-cache uv run deep-research-agent-eval "<prompt>" --skill research-todo --max-turns 10'
+timeout 300s bash -ic 'cd /home/xiemingjie/dev/deep_research_agent && set -a && source .env && set +a && proxy_on && UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/preflight_network.py && UV_CACHE_DIR=/tmp/uv-cache uv run deep-research-agent-eval "<prompt>" --skill research-todo --max-turns 10'
 ```
 
 - If model/network calls still fail in sandbox with `Operation not permitted` or `APIConnectionError`, rerun outside sandbox permissions.
