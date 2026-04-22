@@ -1,5 +1,72 @@
 # CHANGELOG
 
+## 2026-04-22 (by Codex) — 上下文注意力管理改造（M1）
+
+### 新增活跃对象上下文管理
+
+- 新增 `src/deep_research_agent/context_manager.py`：
+  - 以 `research/todo.md`、`source_index.md`、`notes/`、`evidence/`、`checkpoints/` 构建每轮上下文包
+  - 明确区分当前 subgoal、TODO 切片、活跃来源/笔记/证据、前序 checkpoint 与最近 observation
+  - 输出统一 Markdown 上下文载荷（`# 上下文包`），用于模型注意力聚焦
+- `ReActAgent` 不再把整段历史消息无限累积发送；改为每轮：
+  1) 构建 context pack  
+  2) 发送 `system + context user + 紧凑 tail`
+  3) 调用工具后记录 observation 并压缩 tail
+- 新增上下文相关日志事件：
+  - `context_pack_built`
+  - `context_trim_applied`（当块被软裁剪时）
+
+### TODO 闭合约束（程序化 guard）
+
+- 在 `fs_write` 写入 `research/todo.md` 或 `writing/todo.md` 时新增校验：
+  - 任意 `- [x] closed:` 条目必须包含 closure attempt 字段：
+    - `结论`
+    - `依据`
+    - `未决项`
+  - 缺失时写入直接报错，阻止伪闭合
+
+### 检索查询重写（混合策略）
+
+- `web_search` 支持新参数：
+  - `intent`
+  - `anchors`
+  - `exact_phrases`
+- 新增 query 组合函数：
+  - 默认形态为“自然语言意图 + 锚点 + 精确短语”
+  - 返回结果中增加：
+    - `original_query`
+    - `query_strategy`
+
+### 检索策略回退（同日修正）
+
+- 按主线收敛与性能要求，移除 `web_search` 的 runtime query 重写：
+  - 删除 `intent/anchors/exact_phrases` 参数处理
+  - 删除 `original_query/query_strategy` 返回字段
+  - 工具层仅透传模型给出的 `query`，由模型自行选择关键词/自然语言/混合风格
+- 在 `prompts/system.md` 增加查询风格指导，明确：
+  - 简单实体问题优先关键词
+  - 复杂约束问题优先自然语言
+  - 不确定时使用混合表达
+  - 工具层不会改写 query
+- 新增测试：
+  - `tests/test_tools.py::test_web_search_uses_raw_query_without_runtime_rewrite`
+  - `tests/test_prompts.py::test_system_prompt_contains_query_style_guidance`
+
+### 测试新增
+
+- `tests/test_context_manager.py`
+  - 验证上下文包内容构建
+  - 验证 agent 使用 context manager 并产生日志事件
+- `tests/test_todo_closure_guard.py`
+  - 验证 todo 关闭缺少 closure attempt 被拒绝
+  - 验证完整 closure attempt 可写入通过
+
+### 验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_context_manager.py tests/test_todo_closure_guard.py tests/test_agent_loop.py tests/test_tools.py -q`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q`：`32 passed, 6 skipped`
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q`（回退后复验）：`34 passed, 6 skipped`
+
 ## 2026-04-22 (by Kimi Code CLI) — Real API 集成测试
 
 ### 新增 `tests/test_tools_real_api.py`

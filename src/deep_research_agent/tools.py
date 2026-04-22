@@ -186,6 +186,20 @@ def build_builtin_tools(
 
         if mode == "create_only" and path.exists():
             raise FileExistsError(f"File already exists: {path}")
+        existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if mode == "append":
+            next_text = existing_text + content
+        else:
+            next_text = content
+
+        relative_path = str(path.relative_to(workspace_root))
+        if relative_path in {"research/todo.md", "writing/todo.md"}:
+            closure_errors = _validate_todo_closure_attempts(next_text)
+            if closure_errors:
+                raise ValueError(
+                    "TODO closure attempt validation failed: " + "; ".join(closure_errors)
+                )
+
         if mode == "append":
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(content)
@@ -193,7 +207,7 @@ def build_builtin_tools(
             path.write_text(content, encoding="utf-8")
 
         return {
-            "path": str(path.relative_to(workspace_root)),
+            "path": relative_path,
             "bytes_written": len(content.encode("utf-8")),
         }
 
@@ -881,3 +895,42 @@ def _suggest_pdf_filename(url: str) -> str:
         digest = sha1(url.encode("utf-8")).hexdigest()[:12]
         candidate = f"{candidate or 'document'}_{digest}.pdf"
     return candidate
+
+
+def _validate_todo_closure_attempts(text: str) -> list[str]:
+    lines = text.splitlines()
+    errors: list[str] = []
+
+    for index, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if not line.startswith("- [x] closed:"):
+            continue
+
+        closure_window: list[str] = []
+        for sub_line in lines[index + 1 :]:
+            stripped = sub_line.strip()
+            if stripped.startswith("- ["):
+                break
+            if stripped.startswith("## "):
+                break
+            if stripped.startswith("-"):
+                closure_window.append(stripped)
+
+        if not _has_closure_field(closure_window, "结论", "conclusion"):
+            errors.append(f"Missing closure conclusion near line {index + 1}")
+        if not _has_closure_field(closure_window, "依据", "evidence"):
+            errors.append(f"Missing closure evidence near line {index + 1}")
+        if not _has_closure_field(closure_window, "未决项", "open items"):
+            errors.append(f"Missing closure open-items near line {index + 1}")
+
+    return errors
+
+
+def _has_closure_field(lines: list[str], cn_key: str, en_key: str) -> bool:
+    for line in lines:
+        normalized = line.lower()
+        if f"{cn_key}：" in line or f"{cn_key}:" in line:
+            return True
+        if f"{en_key}:" in normalized:
+            return True
+    return False

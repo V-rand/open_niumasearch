@@ -45,6 +45,7 @@ def run_eval_case(
         tool_registry=tools,
         logger=logger,
         config=AgentConfig(max_turns=max_turns),
+        workspace_root=session.workspace_dir,
     )
     result = agent.run(
         user_input=user_input,

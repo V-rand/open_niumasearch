@@ -66,6 +66,7 @@ def main() -> None:
         tool_registry=tools,
         logger=logger,
         config=AgentConfig(max_turns=args.max_turns),
+        workspace_root=session.workspace_dir,
     )
 
     result = agent.run(

@@ -150,6 +150,48 @@ def test_builtin_toolset_includes_mineru_guidance(tmp_path, is_fast_mode: bool) 
     assert "HTML" in tools["jina_reader"]["description"]
 
 
+def test_web_search_uses_raw_query_without_runtime_rewrite(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    monkeypatch.setenv("TAVILY_API_KEY", "dummy-token")
+
+    class _WebSearchFakeClient:
+        def __init__(self) -> None:
+            self.last_payload: dict[str, object] | None = None
+
+        def post(self, url: str, json: dict | None = None, headers: dict | None = None):  # type: ignore[no-untyped-def]
+            assert url == "https://api.tavily.com/search"
+            self.last_payload = json or {}
+            return _FakeResponse(
+                data={
+                    "query": (json or {}).get("query"),
+                    "answer": None,
+                    "results": [{"title": "t", "url": "u", "content": "c", "score": 0.5}],
+                }
+            )
+
+    fake_client = _WebSearchFakeClient()
+    registry = build_builtin_tools(workspace_root=tmp_path, http_client=fake_client)
+    query = "compare model A and B with official sources after 2025"
+    result = registry.invoke(
+        "web_search",
+        {
+            "query": query,
+            "max_results": 3,
+        },
+    )
+
+    assert result.is_error is False
+    assert fake_client.last_payload is not None
+    assert fake_client.last_payload["query"] == query
+
+    payload = json.loads(result.content)
+    assert payload["query"] == query
+    assert "original_query" not in payload
+    assert "query_strategy" not in payload
+
+
 class _FakeArxivPaper:
     def __init__(self, paper_id: str, title: str = "Attention Is All You Need") -> None:
         self.entry_id = f"http://arxiv.org/abs/{paper_id}v1"

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
+from deep_research_agent.context_manager import ContextManager
 from deep_research_agent.logging import RunLogger
 from deep_research_agent.models import AgentRunResult, AssistantResponse, ToolCall, ToolExecutionResult
 from deep_research_agent.tools import ToolRegistry
@@ -38,11 +40,18 @@ class ReActAgent:
         tool_registry: ToolRegistry,
         logger: RunLogger,
         config: AgentConfig | None = None,
+        context_manager: ContextManager | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.model_backend = model_backend
         self.tool_registry = tool_registry
         self.logger = logger
         self.config = config or AgentConfig()
+        resolved_workspace = (workspace_root or Path(".")).resolve()
+        self.context_manager = context_manager or ContextManager(
+            workspace_root=resolved_workspace,
+            logger=logger,
+        )
 
     def run(
         self,
@@ -53,10 +62,7 @@ class ReActAgent:
     ) -> AgentRunResult:
         system_prompt_path = self.logger.write_text_artifact("system_prompt.txt", system_prompt)
         normalized_skill_paths = skill_paths or []
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input},
-        ]
+        conversation_tail: list[dict[str, Any]] = []
         self.logger.log_event(
             event_type="run_start",
             payload={
@@ -73,6 +79,32 @@ class ReActAgent:
         )
 
         for turn_index in range(1, self.config.max_turns + 1):
+            context_pack = self.context_manager.build_context_pack(user_input=user_input)
+            self.logger.log_event(
+                event_type="context_pack_built",
+                payload={
+                    "turn_index": turn_index,
+                    "phase": context_pack.phase,
+                    "subgoal": context_pack.subgoal,
+                    "block_char_counts": context_pack.block_char_counts,
+                    "trimmed_blocks": context_pack.trimmed_blocks,
+                },
+            )
+            if context_pack.trimmed_blocks:
+                self.logger.log_event(
+                    event_type="context_trim_applied",
+                    payload={
+                        "turn_index": turn_index,
+                        "trimmed_blocks": context_pack.trimmed_blocks,
+                    },
+                )
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context_pack.rendered_prompt},
+            ]
+            if conversation_tail:
+                messages.extend(conversation_tail)
+
             self.logger.log_event(
                 event_type="model_request",
                 payload={
@@ -100,10 +132,11 @@ class ReActAgent:
                 },
             )
 
-            messages.append(_assistant_message_from_response(response))
+            assistant_message = _assistant_message_from_response(response)
 
             if response.tool_calls:
                 tool_results = self._dispatch_tool_calls(response.tool_calls)
+                current_turn_tail: list[dict[str, Any]] = [assistant_message]
                 for result in tool_results:
                     self.logger.log_event(
                         event_type="tool_result",
@@ -116,13 +149,19 @@ class ReActAgent:
                             "metadata": result.metadata,
                         },
                     )
-                    messages.append(
+                    self.context_manager.record_tool_observation(
+                        result.name,
+                        result.content,
+                        is_error=result.is_error,
+                    )
+                    current_turn_tail.append(
                         {
                             "role": "tool",
                             "tool_call_id": result.call_id,
                             "content": result.content,
                         }
                     )
+                conversation_tail = _compact_conversation_tail(conversation_tail + current_turn_tail)
                 continue
 
             if response.content:
@@ -136,6 +175,7 @@ class ReActAgent:
                     turn_count=turn_index,
                     run_dir=self.logger.run_dir,
                 )
+            conversation_tail = _compact_conversation_tail(conversation_tail + [assistant_message])
 
         self.logger.log_event(
             event_type="run_stop",
@@ -190,3 +230,22 @@ def _dump_json(value: dict[str, Any]) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False)
+
+
+def _compact_conversation_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(messages) <= 4:
+        return messages
+    # Preserve the latest assistant step and its tool observations for API validity.
+    last_assistant_index = -1
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "assistant":
+            last_assistant_index = index
+            break
+
+    if last_assistant_index < 0:
+        return messages[-4:]
+
+    tail = messages[last_assistant_index:]
+    if len(tail) <= 4:
+        return tail
+    return tail[-4:]
