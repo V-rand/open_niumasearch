@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## 2026-04-22 (by Kimi Code CLI) — Real API 集成测试
+
+### 新增 `tests/test_tools_real_api.py`
+
+- 覆盖 6 个外部工具的端到端真实 API 测试：
+  - `web_search` — Tavily 搜索，验证返回结果含标题、URL、内容摘要
+  - `jina_reader` — Jina Reader 提取网页 Markdown
+  - `arxiv_search` — arXiv 论文搜索
+  - `arxiv_read_paper` — 下载并解析 arXiv PDF 为 Markdown
+  - `pdf_read_url` — 本地 PyMuPDF4LLM 解析 PDF
+  - `mineru_parse_url` — MinerU lightweight 模式解析 PDF
+- 使用 `@pytest.mark.real_api` 标记，默认跳过
+- 通过 `--run-real-api` 显式启用
+- 测试在代理环境下运行，对 `cdn-mineru.openxlab.org.cn` 设置 `no_proxy` 直连避免 SSL 握手失败
+
+### 配置更新
+
+- `pyproject.toml` 注册 `real_api` pytest mark，消除 `Unknown pytest.mark.real_api` 警告
+
+### 验证结果
+
+- `pytest tests/ -q`（默认 fast 模式）：28 passed, 6 skipped
+- `pytest tests/test_tools_real_api.py -v --run-real-api`（代理 + no_proxy）：6 passed
+
+---
+
 ## 2026-04-22 (by Kimi Code CLI)
 
 ### System Prompt 管理重构

@@ -27,6 +27,9 @@ deep-research-agent-eval = "deep_research_agent.eval:main"
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = [
+    "real_api: marks tests that call real external APIs (skipped by default, use --run-real-api to enable)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/deep_research_agent"]
