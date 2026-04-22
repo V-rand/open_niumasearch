@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.codex
+dist/
+build/
+*.pyc
+.env
+logs/
+test_logs/
+artifacts/
+sessions/

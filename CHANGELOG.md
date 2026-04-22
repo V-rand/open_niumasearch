@@ -1,0 +1,151 @@
+# CHANGELOG
+
+## 2026-04-22 (by Kimi Code CLI)
+
+### Skills 重构
+
+- **拆分 TODO skills**：将原来的 `skills/todo-list.md` 拆分为两个独立 skill：
+  - `skills/research-todo.md` — 研究阶段 TODO 管理
+  - `skills/write-todo.md` — 写作阶段 TODO 管理
+- **简化约束**：去掉固定模板、固定章节、固定路径的过度约束，改为动态 TODO 控制面板设计
+- **引入状态机**：支持 `open` / `in_progress` / `tentatively_resolved` / `closed` / `deferred` / `abandoned` 六种状态
+- **引入 closure attempt 机制**：关闭任务必须附带结论、依据、未决项，防止模型过早打勾
+- **增加 one-shot 示例**：每个 skill 包含完整的初始状态 → 一轮更新后的状态示例
+- **增加反模式清单**：列出常见错误，用"不做什么"收窄模型行为空间
+- **参考设计**：借鉴 law_agent 的极简 skill 风格和 Extra08 的 skill 编写最佳实践
+
+### 时间格式调整
+
+- `src/deep_research_agent/logging.py` 中的时间戳从 UTC 改为北京时间（Asia/Shanghai）
+- 时间格式从 `%Y%m%dT%H%M%SZ` 改为 `%Y%m%dT%H%M%S`（去掉 Z 后缀）
+
+### 脚本更新
+
+- `scripts/init_todo_md.py`：支持 research/writing 两个 phase，使用北京时间
+- `scripts/validate_todo_md.py`：校验任务状态是否合法，适配新的多状态设计
+
+### 测试更新
+
+- `tests/test_skills.py`：新增加载 research-todo 和 write-todo 的测试
+- `tests/test_todo_skill_scripts.py`：新增 writing 模板测试和非法状态校验测试
+- `tests/test_session.py`：将 `todo-list` 引用更新为 `research-todo`
+
+### 验证结果
+
+- `pytest tests/ -q --fast` 全部通过（28 tests）
+
+---
+
+## 2026-04-22
+
+- Created the initial `uv` project scaffold, `src/` layout, `.gitignore`, `README.md`, and mandatory `CHANGELOG.md`.
+- Added tests first, before implementation:
+  - `tests/test_agent_loop.py`
+  - `tests/test_tools.py`
+  - `tests/test_logging.py`
+  - `tests/conftest.py` with `--fast`
+- Implemented the minimal runtime needed for V0:
+  - `ReActAgent` while-loop runtime
+  - normalized assistant/tool message objects
+  - `DashScopeOpenAIBackend` using the DashScope OpenAI-compatible endpoint
+  - `RunLogger` with `events.jsonl` and artifact spillover for long payloads
+  - `ToolRegistry` with schema-lite validation and normalized tool results
+- Implemented the first built-in tools:
+  - `fs_list`
+  - `fs_read`
+  - `fs_write`
+  - `fs_patch`
+  - `web_search` via Tavily
+  - `jina_reader` via Jina Reader API
+  - `mineru_parse_url` for PDF/document URL parsing via MinerU
+  - `arxiv_search` and `arxiv_read_paper` via `arxiv.py` + `PyMuPDF4LLM`
+  - `pdf_read_url` with `mineru_first` then local `PyMuPDF4LLM` fallback
+  - added repo-local `skills/todo-list.md` as the dedicated TODO List skill
+- Added runnable entrypoints:
+  - CLI: `deep-research-agent`
+  - tool smoke script: `scripts/smoke_tool.py`
+- Real validation completed:
+  - confirmed `proxy_on` exists as an interactive shell alias and can be used with `bash -ic`
+  - `pytest tests -q --fast` passes via `UV_CACHE_DIR=/tmp/uv-cache`
+  - real DashScope smoke test passed with proxy enabled:
+    - prompt forced filesystem tool usage
+    - agent completed in 3 turns
+    - final answer returned `hello from agent`
+    - run log written under `logs/20260422T072543Z_7ccb047a`
+  - real `jina_reader` smoke test passed against `https://example.com`
+  - real `web_search` smoke test passed for query `OpenAI`
+  - real MinerU lightweight smoke test passed against `https://cdn-mineru.openxlab.org.cn/demo/example.pdf`
+    - MinerU returned parsed Markdown successfully
+  - real MinerU lightweight smoke test against `https://arxiv.org/pdf/1706.03762.pdf`
+    - request reached MinerU but task returned `state=failed`
+    - surfaced error: `model service is temporarily unavailable, please try again later or contact technical support`
+  - direct `httpx` fetch for `https://arxiv.org/pdf/1706.03762.pdf` returned `HTTP 200` and `content-type=application/pdf`
+    - confirms the PDF itself is reachable; failure is not caused by the download path
+  - real `arxiv_search` smoke test passed for query `transformer attention`
+  - real `arxiv_read_paper` smoke test passed for `https://arxiv.org/abs/1706.03762`
+    - downloaded PDF locally and parsed Markdown into `artifacts/arxiv/1706.03762.md`
+  - real `pdf_read_url` smoke tests:
+    - non-arXiv PDF `https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf`
+      - `mineru_first` fell back to local `PyMuPDF4LLM`
+      - result succeeded and produced `artifacts/pdf_cache/dummy.md`
+    - arXiv PDF `https://arxiv.org/pdf/1706.03762.pdf`
+      - `mineru_first` fell back to local `PyMuPDF4LLM`
+      - result succeeded and produced `artifacts/pdf_cache/1706.03762.md`
+    - same non-arXiv PDF under `proxy_on`
+      - final result was still successful and still used local fallback
+- Effective fixes during the process:
+  - cleaned the repository layout after switching to session-based runtime isolation:
+    - removed obsolete top-level `logs/` and `artifacts/` demo outputs
+    - removed transient Python cache directories
+    - removed the unused `SKILLS example.md` draft file
+    - updated `.gitignore` to ignore `sessions/`
+    - updated `README.md` with the current directory layout
+  - added session isolation for each task run:
+    - CLI now creates per-session `workspace/` and `logs/` under `sessions/<session_id>/`
+    - run logs now land inside the owning session instead of the shared top-level `logs/` folder
+    - added `session.json` metadata to preserve the original user input and session identity
+  - unified parsed document storage under each session workspace:
+    - both `arxiv_read_paper` and `pdf_read_url` now write into `sessions/<session_id>/workspace/documents/`
+    - removed the old split between shared `artifacts/arxiv/` and `artifacts/pdf_cache/`
+  - added a stable benchmark-facing eval interface:
+    - new importable helper `deep_research_agent.eval.run_eval_case(...)`
+    - new CLI entrypoint `deep-research-agent-eval` that prints one JSON object for easy benchmark integration
+  - flattened the TODO skill layout:
+    - replaced the nested `skills/todo-list/` directory with a single `skills/todo-list.md`
+    - moved deterministic TODO helper scripts to top-level `scripts/`
+  - changed TODO from a JSON-first design to a Chinese Markdown checklist design:
+    - default TODO files are now `research/todo.md` and `writing/todo.md`
+    - helper scripts are `scripts/init_todo_md.py` and `scripts/validate_todo_md.py`
+    - TODO guidance now follows a human-readable checklist template instead of a JSON object shape
+  - tightened human log output:
+    - `trace.md` now shows prompt and skill paths instead of inlining the full system prompt and skill bodies
+    - system-role message bodies are omitted from the trace to keep the log compact and readable
+  - fixed logger artifact path handling so spilled payload files are actually reachable
+  - fixed CLI entrypoint by adding `if __name__ == "__main__": main()`
+  - updated logging to produce both `events.jsonl` and human-readable `trace.md`
+  - changed log retention policy to keep full payloads inline instead of replacing long text with path-only stubs
+  - long text is still copied into `artifacts/` for convenience, but the main logs no longer lose information
+  - upgraded `trace.md` to group events by `turn_index` while still embedding the full payload for every event
+  - added human-oriented trace sections for common events such as `Messages`, `Tools`, `Reasoning`, `Tool Calls`, and `Tool Content` without removing the full payload block
+  - expanded trace readability further with fixed sections for `System Prompt Content`, role-grouped messages, and a normalized `Tool Catalog`
+  - corrected the trace direction: `trace.md` is now a human-readable natural-language log, while raw structured detail stays in `events.jsonl`
+  - made the human trace more compact by removing timestamps and tool call ids from `trace.md`
+  - changed the default `pdf_read_url` strategy to local `PyMuPDF4LLM`; MinerU is now opt-in instead of the default path
+  - added a dedicated MinerU document-reading tool so PDF/doc/ppt URLs no longer need to go through `jina_reader`
+- Failed attempts preserved:
+  - first real CLI smoke test did nothing because the CLI module lacked the `__main__` guard
+  - direct shell one-liner tool smoke tests failed due quoting/escaping issues, replaced with `scripts/smoke_tool.py`
+  - sandboxed network validation failed with `openai.APIConnectionError`, so real smoke tests were rerun outside the sandbox with explicit approval
+  - MinerU smoke test through `proxy_on` failed with `SSL: UNEXPECTED_EOF_WHILE_READING`
+    - direct network path worked for the official demo PDF, so the current issue appears specific to the proxy path rather than the MinerU tool logic
+  - MinerU also returned `model service is temporarily unavailable` for both arXiv and a non-arXiv dummy PDF during later tests
+    - local `PyMuPDF4LLM` fallback avoided turning this service instability into an agent failure
+- Repository state:
+  - initialized git repository
+  - renamed branch to `main`
+  - added remote `git@github.com:V-rand/open_niumasearch.git`
+- Next tasks:
+  - add structured prompt files instead of embedding the default system prompt in code
+  - add contract tests for the DashScope backend response parsing
+  - decide whether `web_search` should keep direct REST calls or switch to the Tavily SDK
+  - start the next layer above the minimal loop: research task state, TODO state, and checkpoint files
