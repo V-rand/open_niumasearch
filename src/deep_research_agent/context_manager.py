@@ -77,7 +77,7 @@ class ContextManager:
         turn_index: int | None = None,
         max_turns: int | None = None,
     ) -> ContextPack:
-        self._ensure_task_file(user_input)
+        self.ensure_task_file(user_input)
         todo_text = self._read_text("todo.md") or "- 暂无 todo.md，请尽快初始化它。"
         recent_files = self._build_recent_workspace_map()
         observations_summary = "\n".join(self._recent_observations) if self._recent_observations else "- 暂无最近工具观察"
@@ -142,7 +142,7 @@ class ContextManager:
             trimmed_blocks=[],
         )
 
-    def _ensure_task_file(self, user_input: str) -> None:
+    def ensure_task_file(self, user_input: str) -> None:
         path = self.workspace_root / "task.md"
         if path.exists():
             return

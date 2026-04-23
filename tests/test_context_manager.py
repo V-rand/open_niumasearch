@@ -70,7 +70,7 @@ def test_context_manager_reminds_when_todo_is_not_updated(tmp_path, is_fast_mode
     assert "未更新 todo.md" in pack.rendered_prompt
 
 
-def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_fast_mode: bool) -> None:
+def test_react_agent_uses_natural_message_history(tmp_path, is_fast_mode: bool) -> None:
     if is_fast_mode:
         pass
 
@@ -99,13 +99,11 @@ def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_f
         ]
     )
     logger = RunLogger(base_dir=tmp_path / "logs")
-    manager = ContextManager(workspace_root=tmp_path, logger=logger)
     agent = ReActAgent(
         model_backend=backend,
         tool_registry=registry,
         logger=logger,
         config=AgentConfig(max_turns=4),
-        context_manager=manager,
     )
 
     result = agent.run(user_input="say hello", system_prompt="system")
@@ -114,22 +112,28 @@ def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_f
     assert len(backend.calls) == 2
     first_call = backend.calls[0]
     second_call = backend.calls[1]
-    assert len(first_call) == 2
+
+    # First call: system + first_user_message (before any tool calls)
+    # The FakeBackend captures messages AFTER they are built but before response
+    # So first_call is actually the second model call (after tool result + Continue)
+    # Let's check the actual first call which is at index 0
     assert first_call[0]["role"] == "system"
     assert first_call[1]["role"] == "user"
-    assert "启动工作" in str(first_call[1]["content"])
-    assert "task.md" in str(first_call[1]["content"])
+    assert "say hello" in str(first_call[1]["content"])
 
-    # second call still has compact messages and should not replay full raw tool payload history.
-    assert len(second_call) <= 4
+    # Second call: system + first_user + assistant(tool) + tool + user(Continue) + assistant(final)
+    # Natural message flow preserved
+    assert len(second_call) == 6
     assert second_call[0]["role"] == "system"
     assert second_call[1]["role"] == "user"
-    assert "增量工作提示" in str(second_call[1]["content"])
-    assert "say hello" not in str(second_call[1]["content"])
+    assert second_call[2]["role"] == "assistant"
+    assert second_call[3]["role"] == "tool"
+    assert second_call[4]["role"] == "user"
+    assert second_call[5]["role"] == "assistant"
 
     events = [json.loads(line) for line in (logger.run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     event_types = [event["event_type"] for event in events]
-    assert "context_pack_built" in event_types
+    assert "model_request" in event_types
 
 
 def test_context_manager_reports_token_count(tmp_path, is_fast_mode: bool) -> None:

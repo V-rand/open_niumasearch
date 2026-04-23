@@ -27,7 +27,7 @@ class ModelBackend(Protocol):
 
 @dataclass(slots=True)
 class AgentConfig:
-    max_turns: int = 6
+    max_turns: int = 12
     enable_thinking: bool = True
     parallel_tool_calls: bool = True
     tool_choice: str | dict[str, Any] = "auto"
@@ -63,7 +63,16 @@ class ReActAgent:
     ) -> AgentRunResult:
         system_prompt_path = self.logger.write_text_artifact("system_prompt.txt", system_prompt)
         normalized_skill_paths = skill_paths or []
-        conversation_tail: list[dict[str, Any]] = []
+
+        # Natural message history: system + user + assistant + tool + ...
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+        ]
+
+        # First user message: task + light guidance
+        first_user_content = self._build_first_user_message(user_input)
+        messages.append({"role": "user", "content": first_user_content})
+
         self.logger.log_event(
             event_type="run_start",
             payload={
@@ -80,46 +89,17 @@ class ReActAgent:
         )
 
         for turn_index in range(1, self.config.max_turns + 1):
-            context_pack = self.context_manager.build_context_pack(
-                user_input=user_input,
-                turn_index=turn_index,
-                max_turns=self.config.max_turns,
-            )
-            self.logger.log_event(
-                event_type="context_pack_built",
-                payload={
-                    "turn_index": turn_index,
-                    "block_char_counts": context_pack.block_char_counts,
-                    "token_count": context_pack.token_count,
-                    "trimmed_blocks": context_pack.trimmed_blocks,
-                },
-            )
-            if context_pack.trimmed_blocks:
-                self.logger.log_event(
-                    event_type="context_trim_applied",
-                    payload={
-                        "turn_index": turn_index,
-                        "trimmed_blocks": context_pack.trimmed_blocks,
-                    },
-                )
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context_pack.rendered_prompt},
-            ]
-            if conversation_tail:
-                messages.extend(conversation_tail)
-
             effective_tool_choice: str | dict[str, Any] = self.config.tool_choice
 
+            # Log the messages being sent (summarized)
             self.logger.log_event(
                 event_type="model_request",
                 payload={
                     "turn_index": turn_index,
                     "system_prompt_path": system_prompt_path,
                     "skill_paths": normalized_skill_paths,
-                    "context_prompt": context_pack.rendered_prompt,
-                    "input_tokens_estimated": context_pack.token_count,
-                    "conversation_tail": _summarize_conversation_tail_for_log(conversation_tail),
+                    "message_count": len(messages),
+                    "conversation_summary": _summarize_messages_for_log(messages),
                     "tool_names": self.tool_registry.tool_names(),
                     "effective_tool_choice": effective_tool_choice,
                 },
@@ -146,14 +126,13 @@ class ReActAgent:
             )
 
             assistant_message = _assistant_message_from_response(response)
+            messages.append(assistant_message)
 
             if response.tool_calls:
                 tool_results = self._dispatch_tool_calls(response.tool_calls)
                 tool_arguments_by_call_id = {
                     tool_call.id: tool_call.arguments for tool_call in response.tool_calls
                 }
-                current_turn_tail: list[dict[str, Any]] = [assistant_message]
-                updated_todo = False
                 for result in tool_results:
                     self.logger.log_event(
                         event_type="tool_result",
@@ -167,24 +146,17 @@ class ReActAgent:
                             "metadata": result.metadata,
                         },
                     )
-                    self.context_manager.record_tool_observation(
-                        result.name,
-                        result.content,
-                        is_error=result.is_error,
-                    )
-                    updated_todo = updated_todo or _tool_result_updates_todo(result)
-                    current_turn_tail.append(
+                    messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": result.call_id,
                             "content": result.content,
                         }
                     )
-                self.context_manager.record_turn_progress(
-                    used_tools=True,
-                    updated_todo=updated_todo,
+                # After tool results, add a light user message to prompt next thinking
+                messages.append(
+                    {"role": "user", "content": "Continue."}
                 )
-                conversation_tail = _compact_conversation_tail(conversation_tail + current_turn_tail)
                 continue
 
             if response.content:
@@ -198,7 +170,6 @@ class ReActAgent:
                     turn_count=turn_index,
                     run_dir=self.logger.run_dir,
                 )
-            conversation_tail = _compact_conversation_tail(conversation_tail + [assistant_message])
 
         self.logger.log_event(
             event_type="run_stop",
@@ -209,6 +180,17 @@ class ReActAgent:
             stop_reason="max_turns_exceeded",
             turn_count=self.config.max_turns,
             run_dir=self.logger.run_dir,
+        )
+
+    def _build_first_user_message(self, user_input: str) -> str:
+        """Build the first user message with task + light guidance."""
+        self.context_manager.ensure_task_file(user_input)
+        return (
+            f"{user_input.strip()}\n\n"
+            "---\n"
+            "Start by reading or creating `todo.md` to plan your work. "
+            "Use files to persist state and progress. "
+            "When you need context from previous work, read the relevant files."
         )
 
     def _dispatch_tool_calls(self, tool_calls: list[ToolCall]) -> list[ToolExecutionResult]:
@@ -281,37 +263,14 @@ def _assistant_message_from_response(response: AssistantResponse) -> dict[str, A
     return message
 
 
-def _tool_result_updates_todo(result: ToolExecutionResult) -> bool:
-    if result.name not in {"fs_write", "fs_patch"} or result.is_error:
-        return False
-    try:
-        payload = json.loads(result.content)
-    except json.JSONDecodeError:
-        return False
-    return payload.get("path") == "todo.md"
-
-
 def _dump_json(value: dict[str, Any]) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False)
 
 
-def _compact_conversation_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(messages) <= 8:
-        return messages
-    assistant_indices = [index for index, message in enumerate(messages) if message.get("role") == "assistant"]
-    if not assistant_indices:
-        return messages[-8:]
-
-    keep_from = assistant_indices[max(len(assistant_indices) - 4, 0)]
-    tail = messages[keep_from:]
-    if len(tail) <= 8:
-        return tail
-    return tail[-8:]
-
-
-def _summarize_conversation_tail_for_log(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _summarize_messages_for_log(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Summarize the messages array for logging (not sent to model)."""
     summary: list[dict[str, Any]] = []
     for message in messages:
         role = str(message.get("role", "unknown"))
@@ -319,7 +278,7 @@ def _summarize_conversation_tail_for_log(messages: list[dict[str, Any]]) -> list
         if role == "assistant":
             content = str(message.get("content") or "")
             if content:
-                item["content_preview"] = _truncate_text(content, 240)
+                item["content_preview"] = _truncate_text(content, 120)
             tool_calls = message.get("tool_calls")
             if isinstance(tool_calls, list):
                 item["tool_calls"] = [
@@ -331,11 +290,11 @@ def _summarize_conversation_tail_for_log(messages: list[dict[str, Any]]) -> list
             item["tool_call_id"] = message.get("tool_call_id")
             content = str(message.get("content") or "")
             if content:
-                item["content_preview"] = _truncate_text(content, 240)
+                item["content_preview"] = _truncate_text(content, 120)
         else:
             content = str(message.get("content") or "")
             if content:
-                item["content_preview"] = _truncate_text(content, 240)
+                item["content_preview"] = _truncate_text(content, 120)
         summary.append(item)
     return summary
 

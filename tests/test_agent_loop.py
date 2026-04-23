@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from deep_research_agent.agent import AgentConfig, ReActAgent
-from deep_research_agent.agent import _compact_conversation_tail
+
 from deep_research_agent.logging import RunLogger
 from deep_research_agent.models import AssistantResponse, ToolCall
 from deep_research_agent.tools import ToolDefinition, ToolRegistry
@@ -95,7 +95,7 @@ def test_react_agent_runs_tool_then_returns_final(tmp_path, is_fast_mode: bool) 
     assert "model_response" in event_types
     assert "tool_result" in event_types
     model_request_event = next(event for event in events if event["event_type"] == "model_request")
-    assert model_request_event["payload"]["input_tokens_estimated"] > 0
+    assert model_request_event["payload"]["message_count"] > 0
     tool_result_event = next(event for event in events if event["event_type"] == "tool_result")
     assert tool_result_event["payload"]["tool_arguments"] == {"text": "hello"}
 
@@ -171,37 +171,54 @@ def test_react_agent_keeps_tool_choice_stable_across_turns(tmp_path, is_fast_mod
     assert backend.kwargs_history[1]["tool_choice"] == "auto"
 
 
-def test_compact_conversation_tail_keeps_last_four_assistant_tool_rounds(is_fast_mode: bool) -> None:
+def test_messages_grow_naturally_without_truncation(tmp_path, is_fast_mode: bool) -> None:
     if is_fast_mode:
         pass
 
-    messages: list[dict[str, object]] = []
-    for index in range(1, 7):
-        messages.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": f"call_{index}",
-                        "type": "function",
-                        "function": {"name": "echo_tool", "arguments": "{}"},
-                    }
-                ],
-            }
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="echo_tool",
+            description="Echo.",
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+            handler=lambda arguments: {"echo": arguments["text"]},
         )
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": f"call_{index}",
-                "content": f"tool result {index}",
-            }
-        )
+    )
+    backend = FakeModelBackend(
+        [
+            AssistantResponse(
+                reasoning="t1",
+                content=None,
+                tool_calls=[ToolCall(id="c1", name="echo_tool", arguments={"text": "a"})],
+            ),
+            AssistantResponse(
+                reasoning="t2",
+                content=None,
+                tool_calls=[ToolCall(id="c2", name="echo_tool", arguments={"text": "b"})],
+            ),
+            AssistantResponse(
+                reasoning="t3",
+                content=None,
+                tool_calls=[ToolCall(id="c3", name="echo_tool", arguments={"text": "c"})],
+            ),
+            AssistantResponse(reasoning="done", content="final", tool_calls=[]),
+        ]
+    )
+    logger = RunLogger(base_dir=tmp_path / "logs")
+    agent = ReActAgent(
+        model_backend=backend,
+        tool_registry=registry,
+        logger=logger,
+        config=AgentConfig(max_turns=6),
+    )
 
-    compact = _compact_conversation_tail(messages)
+    result = agent.run(user_input="test", system_prompt="system")
 
-    assert len(compact) == 8
-    assert compact[0]["role"] == "assistant"
-    assert compact[0]["tool_calls"][0]["id"] == "call_3"
-    assert compact[-1]["role"] == "tool"
-    assert compact[-1]["tool_call_id"] == "call_6"
+    assert result.final_answer == "final"
+    # All messages preserved: system + user + assistant + tool + user + assistant + tool + user + assistant + tool + user + assistant
+    # = 1 + 1 + (1+1+1)*3 + 1 = 12
+    assert len(backend.calls[-1]) == 12
