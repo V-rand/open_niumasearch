@@ -1,5 +1,44 @@
 # CHANGELOG
 
+## 2026-04-23 (by Codex) — Prompt / TODO Skill 方法论重写：目标必须绑定可验证产出
+
+### 本轮目标
+
+- 把“目标必须有可验证产出，产出出现后才能闭合”提升为 system prompt 和 TODO skill 的核心原则
+- 强化 deep research 方法论，不再只靠纪律条款驱动模型
+- 将“实践、认识、再实践”“抓主要矛盾”“从感性到理性并在写作中固定”的逻辑写进系统工作法
+
+### 核心变更
+
+#### 1. 重写 `prompts/system.md`
+- 从“纪律型约束”扩展为“研究工作法 + 产出闭合原则”
+- 明确加入：
+  - 没有调查就没有发言权
+  - 实践、认识、再实践
+  - 每个目标都必须绑定一个可验证产出
+  - 只有在可验证产出已经出现后，目标才能闭合
+  - 抓主要矛盾
+  - 从感性认识到理性认识，再通过写作实践检验和固定
+
+#### 2. 重写 `skills/todo.md`
+- TODO 不再被当作大任务复述器，而是轻量控制面板
+- 明确要求：
+  - 每个目标写清预期产出与闭合条件
+  - 允许设置当前小目标帮助收敛
+  - 优先识别当前最主要阻塞
+  - 搜索和阅读必须服务于目标，而不是为了搜而搜
+
+#### 3. 契约测试同步
+- `tests/test_prompts.py`
+  - 新增“可验证产出”“产出后闭合”“实践、认识、再实践”“当前最主要矛盾”断言
+- `tests/test_skills.py`
+  - 新增“当前小目标”“搜索和阅读必须服务于目标”等断言
+
+### 验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_prompts.py tests/test_skills.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
 ## 2026-04-23 (by Codex) — ReAct Trace 重构 + 工具指令可见性补齐
 
 ### 本轮目标

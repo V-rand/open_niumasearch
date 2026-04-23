@@ -49,7 +49,10 @@ def test_load_unified_todo_skill_from_repo(is_fast_mode: bool) -> None:
     assert len(loaded) == 1
     assert loaded[0].name == "todo"
     assert "FIREWALL" in loaded[0].content
-    assert "fs_patch" in loaded[0].content
+    assert "可验证产出" in loaded[0].content
+    assert "只有在产出已经落地后才能闭合" in loaded[0].content
+    assert "当前小目标" in loaded[0].content
+    assert "搜索和阅读必须服务于目标" in loaded[0].content
 
 
 def test_load_same_todo_skill_multiple_times(is_fast_mode: bool) -> None:
