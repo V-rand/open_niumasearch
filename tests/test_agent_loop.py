@@ -94,6 +94,8 @@ def test_react_agent_runs_tool_then_returns_final(tmp_path, is_fast_mode: bool) 
     assert "model_request" in event_types
     assert "model_response" in event_types
     assert "tool_result" in event_types
+    tool_result_event = next(event for event in events if event["event_type"] == "tool_result")
+    assert tool_result_event["payload"]["tool_arguments"] == {"text": "hello"}
 
 
 def test_react_agent_stops_when_no_final_answer(tmp_path, is_fast_mode: bool) -> None:

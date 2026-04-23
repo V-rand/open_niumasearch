@@ -175,6 +175,9 @@ class RunLogger:
 
         lines: list[str] = []
 
+        if event_type in {"context_pack_built", "context_trim_applied"}:
+            return
+
         # Lifecycle events (run_start, run_stop, or tool_result without turn)
         if turn_index is None:
             if event_type == "run_start":
@@ -192,7 +195,9 @@ class RunLogger:
         if self._current_trace_turn != turn_index:
             self._current_trace_turn = turn_index
             summary = self._turn_summary_from_payload(payload, event_type)
-            lines.append(f"\n## Turn {turn_index} — {summary}\n")
+            lines.append(f"\n## Turn {turn_index}\n")
+            if summary:
+                lines.append(f"_概览_: {summary}\n")
 
         if event_type == "model_request":
             lines.extend(self._trace_model_request(payload))
@@ -282,47 +287,53 @@ class RunLogger:
         tool_calls = payload.get("tool_calls")
 
         if reasoning:
-            lines.append(f"🤔 **Thinking**")
-            lines.append(f"> {reasoning.strip().replace(chr(10), chr(10) + '> ')}\n")
-
-        if content:
-            lines.append(f"💬 **Output**")
-            lines.append(f"{content.strip()}\n")
+            lines.append("**思考**")
+            lines.append(self._compact_preview(str(reasoning), max_lines=12))
+            lines.append("")
 
         if tool_calls:
-            for tc in tool_calls:
+            lines.append("**行动**")
+            for index, tc in enumerate(tool_calls, start=1):
                 if not isinstance(tc, dict):
                     continue
                 name = self._tool_name_from_call(tc)
                 function = tc.get("function")
                 args = function.get("arguments") if isinstance(function, dict) else tc.get("arguments")
-                args_str = self._inline_args(args)
-                lines.append(f"🛠️ **Tool**: `{name}` — {args_str}\n")
+                lines.append(f"{index}. `{name}`")
+                lines.append("   指令:")
+                lines.append(self._compact_preview(self._render_arguments_block(args), max_lines=12))
+            lines.append("")
+
+        if content:
+            lines.append("**输出**")
+            lines.append(self._compact_preview(str(content), max_lines=16))
+            lines.append("")
 
         return lines
 
     def _trace_model_request(self, payload: dict[str, Any]) -> list[str]:
         lines: list[str] = []
         context_prompt = payload.get("context_prompt")
-        # Extract token count if available in context_pack_built event or payload
-        token_count = payload.get("token_count") 
-        
-        token_label = f" [Estimated Tokens: {token_count}]" if token_count else ""
-        
+        token_count = payload.get("token_count")
+        tool_names = payload.get("tool_names")
+        effective_tool_choice = payload.get("effective_tool_choice")
+
         if context_prompt:
-            lines.append(f"🧾 **Context Input**{token_label}")
+            lines.append("**思考输入**")
+            if token_count is not None:
+                lines.append(f"- 估算 Token: `{token_count}`")
+            if isinstance(tool_names, list) and tool_names:
+                tools_text = ", ".join(f"`{name}`" for name in tool_names)
+                lines.append(f"- 可用工具: {tools_text}")
+            if effective_tool_choice is not None:
+                lines.append(f"- 工具策略: `{effective_tool_choice}`")
             lines.append(self._compact_preview(str(context_prompt), max_lines=18))
             lines.append("")
 
         conversation_tail = payload.get("conversation_tail")
         if isinstance(conversation_tail, list) and conversation_tail:
-            lines.append("**Conversation Tail**")
+            lines.append("**最近对话尾部**")
             lines.append(self._compact_preview(self._render_value(conversation_tail), max_lines=8))
-            lines.append("")
-
-        effective_tool_choice = payload.get("effective_tool_choice")
-        if effective_tool_choice is not None:
-            lines.append(f"**Tool Choice**: `{effective_tool_choice}`")
             lines.append("")
 
         return lines
@@ -332,97 +343,71 @@ class RunLogger:
         is_error = bool(payload.get("is_error"))
         content = payload.get("content")
         metadata = payload.get("metadata")
-
-        emoji = "❌" if is_error else "📄"
+        tool_arguments = payload.get("tool_arguments")
         status = "error" if is_error else "ok"
+        lines = ["**观察**", f"- `{tool_name}` | `{status}`"]
 
-        lines = [f"{emoji} **Result** (`{tool_name}`, {status})"]
+        if tool_arguments not in (None, {}, []):
+            lines.append("  指令:")
+            lines.append(self._compact_preview(self._render_arguments_block(tool_arguments), max_lines=12))
 
-        # Special handling for TODO updates
-        if not is_error and tool_name in ("fs_patch", "fs_write"):
-            # We need to peek into the arguments of the previous model_response
-            # But the logger doesn't easily have that state. 
-            # Let's check the content instead if it looks like a TODO path.
-            # Actually, the payload here IS the result of the tool.
-            # For fs_write, it's just bytes_written. For fs_patch, it's a success message.
-            # To show WHAT changed, we'd need the arguments.
-            # Let's at least highlight THAT it was a TODO update.
-            pass
-
-        # Smart content preview
         if content:
-            # Special case for TODO updates (metadata path check)
-            is_todo = "todo.md" in str(payload.get("metadata", {}).get("path", ""))
-            
-            if not is_error:
-                if is_todo:
-                    lines.append("📋 **PROGRESS TRACKED: todo.md updated.**")
-                
-                # Try to extract metadata for search/read tools
-                try:
-                    data = json.loads(content)
-                    if isinstance(data, dict):
-                        summary_parts = []
-                        for key in ("title", "url", "path", "raw_path", "paper_id", "query"):
-                            if val := data.get(key):
-                                summary_parts.append(f"**{key}**: {val}")
-                        
-                        if summary_parts:
-                            lines.append("> " + " | ".join(summary_parts))
-                        
-                        # If it's a long content tool, truncate the main body in trace
-                        if "content" in data or "markdown" in data or "results" in data:
-                            main_body = data.get("content") or data.get("markdown") or str(data.get("results"))
-                            preview = self._compact_preview(main_body, max_lines=5, aggressive=True)
-                            lines.append(preview)
-                        else:
-                            # Not a known structured tool result, show generic preview
-                            lines.append(self._compact_preview(content, max_lines=8))
-                    else:
-                        lines.append(self._compact_preview(content, max_lines=8))
-                except json.JSONDecodeError:
-                    # Not JSON, check if it's a TODO update via content signature
-                    if "todo.md" in str(payload.get("metadata", {}).get("path", "")):
-                        lines.append("📋 **TODO Updated**")
-                    lines.append(self._compact_preview(content, max_lines=8))
-            else:
-                lines.append(self._compact_preview(content, max_lines=8))
+            lines.append("  结果:")
+            lines.append(self._compact_preview(self._extract_tool_result_preview(str(content)), max_lines=8))
 
-        # Compact metadata
         if metadata and metadata not in ({}, None):
-            meta_preview = self._compact_preview(self._render_value(metadata), max_lines=3)
-            lines.append(f"_metadata_: {meta_preview}")
+            lines.append("  元数据:")
+            lines.append(self._compact_preview(self._render_value(metadata), max_lines=4, aggressive=True))
 
         lines.append("")
         return lines
 
     def _trace_generic(self, event_type: str, payload: dict[str, Any]) -> list[str]:
-        return [f"**{event_type}**", f"{self._compact_preview(self._render_value(payload), max_lines=5)}", ""]
+        return [f"**{event_type}**", self._compact_preview(self._render_value(payload), max_lines=5), ""]
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _inline_args(self, args: Any) -> str:
-        """Render tool arguments as a compact inline string."""
+    def _render_arguments_block(self, args: Any) -> str:
         if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                return args[:100]
-        if isinstance(args, dict):
-            parts: list[str] = []
-            for k, v in args.items():
-                if isinstance(v, str):
-                    v_str = v if len(v) < 60 else v[:57] + "..."
-                    parts.append(f'{k}="{v_str}"')
-                else:
-                    v_str = json.dumps(v, ensure_ascii=False)
-                    if len(v_str) > 60:
-                        v_str = v_str[:57] + "..."
-                    parts.append(f"{k}={v_str}")
-            return ", ".join(parts)
-        return str(args)[:100]
+            parsed = self._try_parse_json_string(args)
+            if parsed is not None:
+                return json.dumps(parsed, ensure_ascii=False, indent=2)
+            return args
+        if isinstance(args, (dict, list)):
+            return json.dumps(args, ensure_ascii=False, indent=2)
+        return str(args)
+
+    def _extract_tool_result_preview(self, content: str) -> str:
+        parsed = self._try_parse_json_string(content)
+        if not isinstance(parsed, dict):
+            return content
+
+        focus: dict[str, Any] = {}
+        for key in (
+            "title",
+            "url",
+            "path",
+            "raw_path",
+            "paper_id",
+            "query",
+            "summary",
+            "preview",
+            "message",
+            "error",
+        ):
+            if key in parsed and parsed[key] not in (None, "", [], {}):
+                focus[key] = parsed[key]
+        if "results" in parsed and parsed["results"]:
+            focus["results"] = parsed["results"]
+        if "content" in parsed and parsed["content"]:
+            focus["content_preview"] = str(parsed["content"])[:800]
+        if "markdown" in parsed and parsed["markdown"]:
+            focus["markdown_preview"] = str(parsed["markdown"])[:800]
+        if not focus:
+            focus = parsed
+        return json.dumps(focus, ensure_ascii=False, indent=2)
 
     def _compact_preview(self, text: str, max_lines: int = 8, aggressive: bool = False) -> str:
         """Return full content in a code block; only truncate truly huge payloads."""

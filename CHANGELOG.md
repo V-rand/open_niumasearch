@@ -1,5 +1,60 @@
 # CHANGELOG
 
+## 2026-04-23 (by Codex) — ReAct Trace 重构 + 工具指令可见性补齐
+
+### 本轮目标
+
+- 让 `trace.md` 更接近真实 ReAct 过程，按“思考 / 行动 / 观察 / 输出”组织，而不是碎片化事件标题
+- 在日志里补齐“模型调用工具时到底发了什么指令”，避免只看到结果看不到参数
+- 给新引入的 token 计数补上测试，并同步清理落后的旧契约测试
+
+### 核心变更
+
+#### 1. Trace 视图改为按回合工作流组织
+- `src/deep_research_agent/logging.py`
+  - `trace.md` 现在按回合输出：
+    - `思考输入`
+    - `思考`
+    - `行动`
+    - `观察`
+    - `输出`
+  - 去掉旧的 emoji 风格碎片化小节，减少“看日志像看原始事件流”的割裂感
+  - `context_pack_built` / `context_trim_applied` 这类偏内部事件不再进入 `trace.md`，只保留在 `events.jsonl`
+  - `model_request` 在 trace 中明确显示：
+    - 估算 Token
+    - 可用工具列表
+    - 工具策略
+
+#### 2. 工具调用指令正式进入结果日志
+- `src/deep_research_agent/agent.py`
+  - 在记录 `tool_result` 事件时，额外写入 `tool_arguments`
+- `src/deep_research_agent/logging.py`
+  - `观察` 区块现在会直接展示该工具调用的参数
+  - 这样看 `trace.md` 或 `events.jsonl` 时，都能知道：
+    - 调了什么工具
+    - 用了什么参数
+    - 得到了什么结果
+
+#### 3. 契约测试同步到最新实现
+- `tests/test_logging.py`
+  - 更新为校验新的 ReAct 风格 trace
+  - 新增 token count / tool catalog / tool strategy 展示测试
+- `tests/test_agent_loop.py`
+  - 新增 `tool_result` 必须携带 `tool_arguments` 的断言
+- `tests/test_context_manager.py`
+  - 新增 token count 测试
+  - 移除对旧 `Memory.md` / 旧上下文文案的过时断言
+- `tests/test_prompts.py`
+  - 改为校验当前 system prompt 中真实存在的契约
+- `tests/test_tools.py`
+  - 改为校验当前实现不会再创建 `Memory.md`
+
+### 验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_logging.py tests/test_agent_loop.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
+
 ## 2026-04-23 (by Codex) — 架构审计与硬契约强化：彻底去冗余 + Token 监控
 
 ### 本轮目标

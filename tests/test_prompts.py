@@ -9,6 +9,6 @@ def test_system_prompt_contains_core_principles(is_fast_mode: bool) -> None:
 
     prompt = get_system_prompt()
     assert "核心工作原则" in prompt
-    assert "调查 -> 认识 -> 写作" in prompt
-    assert "外部化工作记忆" in prompt
-
+    assert "查重契约" in prompt
+    assert "证据锚定契约" in prompt
+    assert "不再维护 `Memory.md`" in prompt

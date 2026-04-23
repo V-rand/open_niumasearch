@@ -66,15 +66,14 @@ def test_builtin_filesystem_tools_roundtrip(tmp_path, is_fast_mode: bool) -> Non
     assert "world" in updated.content
 
 
-def test_build_builtin_tools_creates_memory_file(tmp_path, is_fast_mode: bool) -> None:
+def test_build_builtin_tools_does_not_create_memory_file(tmp_path, is_fast_mode: bool) -> None:
     if is_fast_mode:
         pass
 
     build_builtin_tools(workspace_root=tmp_path)
 
     memory_path = tmp_path / "Memory.md"
-    assert memory_path.exists()
-    assert "todo.md" in memory_path.read_text(encoding="utf-8")
+    assert not memory_path.exists()
 
 
 class _FakeResponse:

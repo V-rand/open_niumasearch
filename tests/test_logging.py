@@ -28,10 +28,9 @@ def test_logger_spills_large_payload_to_artifact(tmp_path, is_fast_mode: bool) -
 
     trace_path = logger.run_dir / "trace.md"
     trace_content = trace_path.read_text(encoding="utf-8")
-    # New diary-style trace: no "Lifecycle" heading, tool result shown inline
-    assert "📄 **Result** (`sample_tool`, ok)" in trace_content
+    assert "**观察**" in trace_content
+    assert "`sample_tool` | `ok`" in trace_content
     assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" in trace_content
-    assert "### Payload" not in trace_content
     assert "timestamp:" not in trace_content
 
 
@@ -53,12 +52,11 @@ def test_trace_groups_events_by_turn(tmp_path, is_fast_mode: bool) -> None:
     assert "## 启动" in trace_content
     assert "## Turn 1" in trace_content
     assert "## Turn 2" in trace_content
-    assert "### Event" not in trace_content
-    assert "🧾 **Context Input**" in trace_content
+    assert "**思考输入**" in trace_content
     assert "# 上下文包" in trace_content
-    assert "💬 **Output**" in trace_content
+    assert "**输出**" in trace_content
     assert "b" in trace_content
-    assert "📄 **Result**" in trace_content
+    assert "**观察**" in trace_content
     assert "c" in trace_content
 
 
@@ -99,13 +97,15 @@ def test_trace_adds_visual_sections_for_common_events(tmp_path, is_fast_mode: bo
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
-    assert "🧾 **Context Input**" in trace_content
+    assert "**思考输入**" in trace_content
     assert "hello" in trace_content
-    assert "🤔 **Thinking**" in trace_content
+    assert "**思考**" in trace_content
     assert "Need to read a file first." in trace_content
-    assert "🛠️ **Tool**: `fs_read`" in trace_content
-    assert "path=\"a.md\"" in trace_content
-    assert "📄 **Result** (`fs_read`, ok)" in trace_content
+    assert "**行动**" in trace_content
+    assert "`fs_read`" in trace_content
+    assert '"path": "a.md"' in trace_content
+    assert "**观察**" in trace_content
+    assert '"path": "a.md"' in trace_content
     assert "file body" in trace_content
 
 
@@ -154,7 +154,7 @@ def test_trace_omits_system_message_body_from_model_request(tmp_path, is_fast_mo
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
     assert "very long system prompt body" not in trace_content
-    assert "🧾 **Context Input**" in trace_content
+    assert "**思考输入**" in trace_content
     assert "hello" in trace_content
 
 
@@ -222,5 +222,30 @@ def test_trace_renders_openai_style_assistant_tool_calls(tmp_path, is_fast_mode:
     )
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
-    assert "🛠️ **Tool**: `fs_write`" in trace_content
+    assert "**行动**" in trace_content
+    assert "`fs_write`" in trace_content
     assert "demo.md" in trace_content
+
+
+def test_trace_shows_token_count_and_tool_catalog(tmp_path, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    logger = RunLogger(base_dir=tmp_path / "logs")
+    logger.log_event(
+        event_type="model_request",
+        payload={
+            "turn_index": 1,
+            "context_prompt": "hello",
+            "token_count": 321,
+            "conversation_tail": [],
+            "tool_names": ["fs_read", "web_search"],
+            "effective_tool_choice": "auto",
+        },
+    )
+
+    trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
+
+    assert "估算 Token: `321`" in trace_content
+    assert "可用工具: `fs_read`, `web_search`" in trace_content
+    assert "工具策略: `auto`" in trace_content

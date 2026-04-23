@@ -25,19 +25,15 @@ def test_context_manager_builds_markdown_context_pack(tmp_path, is_fast_mode: bo
     if is_fast_mode:
         pass
 
-    (tmp_path / "Memory.md").write_text(
-        "# Workspace Memory\n\n- `todo.md`: 统一任务控制面板\n- `research/source_index.md`: 来源索引\n- `research/raw/`: 原始材料\n",
-        encoding="utf-8",
-    )
+    (tmp_path / "todo.md").write_text("- [ ] open: 建立初始任务列表\n", encoding="utf-8")
 
     manager = ContextManager(workspace_root=tmp_path)
     manager.record_tool_observation("web_search", '{"query":"A","results":[{"title":"t"}]}', is_error=False)
     payload = manager.build_context_payload(user_input="请继续研究")
 
-    assert "当前任务" in payload
-    assert "## Workspace Memory" in payload
-    assert "`todo.md`" in payload
-    assert "`research/source_index.md`" in payload
+    assert "核心任务锚点" in payload
+    assert "## 当前进度 (todo.md)" in payload
+    assert "建立初始任务列表" in payload
     assert "web_search" in payload
 
 
@@ -64,7 +60,6 @@ def test_context_manager_reminds_when_todo_is_not_updated(tmp_path, is_fast_mode
     if is_fast_mode:
         pass
 
-    (tmp_path / "Memory.md").write_text("# Workspace Memory\n\n- `todo.md`\n", encoding="utf-8")
     manager = ContextManager(workspace_root=tmp_path)
     manager.record_turn_progress(used_tools=True, updated_todo=False)
 
@@ -120,7 +115,7 @@ def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_f
     assert len(first_call) == 2
     assert first_call[0]["role"] == "system"
     assert first_call[1]["role"] == "user"
-    assert "工作上下文" in str(first_call[1]["content"])
+    assert "核心任务锚点" in str(first_call[1]["content"])
 
     # second call still has compact messages and should not replay full raw tool payload history.
     assert len(second_call) <= 4
@@ -130,3 +125,16 @@ def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_f
     events = [json.loads(line) for line in (logger.run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     event_types = [event["event_type"] for event in events]
     assert "context_pack_built" in event_types
+
+
+def test_context_manager_reports_token_count(tmp_path, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    (tmp_path / "todo.md").write_text("- [ ] open: 写测试\n", encoding="utf-8")
+    manager = ContextManager(workspace_root=tmp_path)
+
+    pack = manager.build_context_pack(user_input="请继续")
+
+    assert pack.token_count > 0
+    assert pack.block_char_counts["input_task"] == len("请继续")

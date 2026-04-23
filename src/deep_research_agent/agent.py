@@ -148,6 +148,9 @@ class ReActAgent:
 
             if response.tool_calls:
                 tool_results = self._dispatch_tool_calls(response.tool_calls)
+                tool_arguments_by_call_id = {
+                    tool_call.id: tool_call.arguments for tool_call in response.tool_calls
+                }
                 current_turn_tail: list[dict[str, Any]] = [assistant_message]
                 updated_todo = False
                 for result in tool_results:
@@ -158,6 +161,7 @@ class ReActAgent:
                             "tool_name": result.name,
                             "call_id": result.call_id,
                             "is_error": result.is_error,
+                            "tool_arguments": tool_arguments_by_call_id.get(result.call_id),
                             "content": result.content,
                             "metadata": result.metadata,
                         },
