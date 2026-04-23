@@ -372,13 +372,18 @@ def build_builtin_tools(
             firecrawl_key = _resolve_firecrawl_api_key()
             if not firecrawl_key:
                 raise jina_exc
-            return _firecrawl_scrape_fallback(
+            fallback = _firecrawl_scrape_fallback(
                 workspace_root=workspace_root,
                 url=arguments["url"],
                 firecrawl_api_key=firecrawl_key,
                 http_client=http_client,
                 jina_error=jina_exc,
             )
+            # Also truncate fallback content
+            fb_content = fallback.get("content", "")
+            if len(fb_content) > 800:
+                fallback["content"] = fb_content[:800].rstrip() + "..."
+            return fallback
 
     def mineru_parse_url(arguments: dict[str, Any]) -> dict[str, Any]:
         mode = arguments.get("mode", "lightweight")
