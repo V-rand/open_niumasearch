@@ -237,7 +237,7 @@ def test_trace_shows_token_count_and_tool_catalog(tmp_path, is_fast_mode: bool) 
         payload={
             "turn_index": 1,
             "context_prompt": "hello",
-            "token_count": 321,
+            "input_tokens_estimated": 321,
             "conversation_tail": [],
             "tool_names": ["fs_read", "web_search"],
             "effective_tool_choice": "auto",
@@ -246,6 +246,30 @@ def test_trace_shows_token_count_and_tool_catalog(tmp_path, is_fast_mode: bool) 
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
-    assert "估算 Token: `321`" in trace_content
+    assert "估算输入 Token: `321`" in trace_content
     assert "可用工具: `fs_read`, `web_search`" in trace_content
     assert "工具策略: `auto`" in trace_content
+
+
+def test_trace_shows_model_response_token_usage(tmp_path, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    logger = RunLogger(base_dir=tmp_path / "logs")
+    logger.log_event(
+        event_type="model_response",
+        payload={
+            "turn_index": 1,
+            "reasoning": "think",
+            "content": "answer",
+            "tool_calls": [],
+            "prompt_tokens_api": 111,
+            "output_tokens": 22,
+            "total_tokens_api": 133,
+        },
+    )
+
+    trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
+    assert "输入 Token(API): `111`" in trace_content
+    assert "输出 Token(API): `22`" in trace_content
+    assert "总 Token(API): `133`" in trace_content

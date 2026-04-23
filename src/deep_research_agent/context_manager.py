@@ -19,13 +19,9 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class ContextPack:
-    phase: str
-    subgoal: str
     todo_slice: str
     sources_summary: str
     notes_summary: str
-    evidence_summary: str
-    checkpoint_summary: str
     observations_summary: str
     rendered_prompt: str
     block_char_counts: dict[str, int]
@@ -43,9 +39,7 @@ class ContextManager:
         self.workspace_root = Path(workspace_root).resolve()
         self.logger = logger
         self._recent_observations: deque[str] = deque(maxlen=4)
-        self._soft_context_target_tokens = 100_000 # Aim for 100k safety buffer
         self._stale_todo_turns = 0
-        self._turns_since_last_fs_list = 0
 
     def estimate_tokens(self, text: str) -> int:
         if _TOKENIZER:
@@ -58,11 +52,6 @@ class ContextManager:
         status = "error" if is_error else "ok"
         compact = self._summarize_tool_observation(content)
         self._recent_observations.append(f"- [{status}] {tool_name}: {compact}")
-        
-        if tool_name == "fs_list":
-            self._turns_since_last_fs_list = 0
-        else:
-            self._turns_since_last_fs_list += 1
 
     def record_turn_progress(self, *, used_tools: bool, updated_todo: bool) -> None:
         if updated_todo:
@@ -96,15 +85,10 @@ class ContextManager:
 
         sections = {
             "input_task": user_input.strip(),
-            "phase": "agent_managed",
-            "subgoal": "",
             "todo_slice": todo_text,
             "sources_summary": todo_reminder,
             "notes_summary": recent_files,
-            "evidence_summary": "",
-            "checkpoint_summary": "",
             "observations_summary": observations_summary,
-            "raw_sources": "",
         }
 
         task_preview = self._compact_text(user_input.strip(), max_chars=280)
@@ -148,13 +132,9 @@ class ContextManager:
         token_count = self.estimate_tokens(rendered)
         
         return ContextPack(
-            phase=sections["phase"],
-            subgoal=sections["subgoal"],
             todo_slice=sections["todo_slice"],
             sources_summary=sections["sources_summary"],
             notes_summary=sections["notes_summary"],
-            evidence_summary=sections["evidence_summary"],
-            checkpoint_summary=sections["checkpoint_summary"],
             observations_summary=sections["observations_summary"],
             rendered_prompt=rendered,
             block_char_counts={k: len(v) for k, v in sections.items()},
@@ -189,42 +169,6 @@ class ContextManager:
             return ""
         return path.read_text(encoding="utf-8")
 
-    def _render_todo_block(self, text: str, *, default: str) -> str:
-        if not text.strip():
-            return default
-        return text.strip()
-
-    def _render_text_block(self, text: str, *, default: str) -> str:
-        if not text.strip():
-            return default
-        return text.strip()
-
-    def _collect_file_manifest(self, relative_dir: str, *, title: str) -> str:
-        directory = self.workspace_root / relative_dir
-        if not directory.exists() or not directory.is_dir():
-            return f"- 暂无 {title}"
-        files = sorted(path for path in directory.rglob("*.md") if path.is_file())
-        if not files:
-            return f"- 暂无 {title}"
-
-        items: list[str] = []
-        for path in files:
-            rel = path.relative_to(self.workspace_root)
-            title_line = self._extract_first_heading(path)
-            if title_line:
-                items.append(f"- {rel} | {title_line}")
-            else:
-                items.append(f"- {rel}")
-        return "\n".join(items)
-
-    def _extract_first_heading(self, path: Path) -> str:
-        text = path.read_text(encoding="utf-8")
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if line.startswith("#"):
-                return line.lstrip("#").strip()
-        return ""
-
     def _summarize_tool_observation(self, content: str) -> str:
         parsed = self._try_parse_json_string(content)
         if isinstance(parsed, dict):
@@ -249,13 +193,6 @@ class ContextManager:
         return (
             f"- 已连续 {self._stale_todo_turns} 轮未更新 todo.md。"
             " 本轮优先回看并推进 TODO，再继续发散检索。"
-        )
-
-    def _default_memory_overview(self) -> str:
-        return (
-            "- `Memory.md` 缺失，请创建它并记录工作区入口。\n"
-            "- 关键入口通常包括 `todo.md`、`research/source_index.md`、`research/raw/`、"
-            "`research/notes/`、`research/evidence/`、`writing/drafts/`、`research/report.md`。"
         )
 
     def _compact_text(self, text: str, *, max_chars: int) -> str:

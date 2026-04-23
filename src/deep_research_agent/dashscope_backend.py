@@ -44,6 +44,7 @@ class DashScopeOpenAIBackend:
 
         response = self.client.chat.completions.create(**request_kwargs)
         message = response.choices[0].message
+        usage = getattr(response, "usage", None)
 
         tool_calls: list[ToolCall] = []
         if message.tool_calls:
@@ -58,7 +59,14 @@ class DashScopeOpenAIBackend:
 
         reasoning = getattr(message, "reasoning_content", None)
         content = message.content if isinstance(message.content, str) else None
-        return AssistantResponse(reasoning=reasoning, content=content, tool_calls=tool_calls)
+        return AssistantResponse(
+            reasoning=reasoning,
+            content=content,
+            tool_calls=tool_calls,
+            prompt_tokens=getattr(usage, "prompt_tokens", None),
+            completion_tokens=getattr(usage, "completion_tokens", None),
+            total_tokens=getattr(usage, "total_tokens", None),
+        )
 
 
 def _parse_tool_arguments(raw_arguments: str | dict[str, Any] | None) -> dict[str, Any]:

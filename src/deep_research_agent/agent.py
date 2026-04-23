@@ -89,8 +89,6 @@ class ReActAgent:
                 event_type="context_pack_built",
                 payload={
                     "turn_index": turn_index,
-                    "phase": context_pack.phase,
-                    "subgoal": context_pack.subgoal,
                     "block_char_counts": context_pack.block_char_counts,
                     "token_count": context_pack.token_count,
                     "trimmed_blocks": context_pack.trimmed_blocks,
@@ -120,7 +118,7 @@ class ReActAgent:
                     "system_prompt_path": system_prompt_path,
                     "skill_paths": normalized_skill_paths,
                     "context_prompt": context_pack.rendered_prompt,
-                    "token_count": context_pack.token_count,
+                    "input_tokens_estimated": context_pack.token_count,
                     "conversation_tail": _summarize_conversation_tail_for_log(conversation_tail),
                     "tool_names": self.tool_registry.tool_names(),
                     "effective_tool_choice": effective_tool_choice,
@@ -141,6 +139,9 @@ class ReActAgent:
                     "reasoning": response.reasoning,
                     "content": response.content,
                     "tool_calls": response.tool_calls,
+                    "prompt_tokens_api": response.prompt_tokens,
+                    "output_tokens": response.completion_tokens,
+                    "total_tokens_api": response.total_tokens,
                 },
             )
 
@@ -281,8 +282,6 @@ def _assistant_message_from_response(response: AssistantResponse) -> dict[str, A
 
 
 def _tool_result_updates_todo(result: ToolExecutionResult) -> bool:
-    if result.name == "todo_manage" and not result.is_error:
-        return True
     if result.name not in {"fs_write", "fs_patch"} or result.is_error:
         return False
     try:

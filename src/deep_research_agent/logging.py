@@ -285,6 +285,19 @@ class RunLogger:
         reasoning = payload.get("reasoning")
         content = payload.get("content")
         tool_calls = payload.get("tool_calls")
+        prompt_tokens_api = payload.get("prompt_tokens_api")
+        output_tokens = payload.get("output_tokens")
+        total_tokens_api = payload.get("total_tokens_api")
+
+        if any(value is not None for value in (prompt_tokens_api, output_tokens, total_tokens_api)):
+            lines.append("**Token 统计**")
+            if prompt_tokens_api is not None:
+                lines.append(f"- 输入 Token(API): `{prompt_tokens_api}`")
+            if output_tokens is not None:
+                lines.append(f"- 输出 Token(API): `{output_tokens}`")
+            if total_tokens_api is not None:
+                lines.append(f"- 总 Token(API): `{total_tokens_api}`")
+            lines.append("")
 
         if reasoning:
             lines.append("**思考**")
@@ -314,14 +327,14 @@ class RunLogger:
     def _trace_model_request(self, payload: dict[str, Any]) -> list[str]:
         lines: list[str] = []
         context_prompt = payload.get("context_prompt")
-        token_count = payload.get("token_count")
+        input_tokens_estimated = payload.get("input_tokens_estimated")
         tool_names = payload.get("tool_names")
         effective_tool_choice = payload.get("effective_tool_choice")
 
         if context_prompt:
             lines.append("**思考输入**")
-            if token_count is not None:
-                lines.append(f"- 估算 Token: `{token_count}`")
+            if input_tokens_estimated is not None:
+                lines.append(f"- 估算输入 Token: `{input_tokens_estimated}`")
             if isinstance(tool_names, list) and tool_names:
                 tools_text = ", ".join(f"`{name}`" for name in tool_names)
                 lines.append(f"- 可用工具: {tools_text}")

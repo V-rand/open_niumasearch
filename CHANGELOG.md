@@ -1,5 +1,77 @@
 # CHANGELOG
 
+## 2026-04-23 (by Codex) — Token 统计落日志 + 清理上下文残留 + 长 Query 运行画像
+
+### 本轮目标
+
+- 为每一轮记录输入/输出 token 量，便于诊断真实 long-query 运行成本
+- 清理当前实现里已经不重要或已失效的上下文残留
+- 跑一轮长 query，并将每 turn 的 token 变化绘制出来
+
+### 核心变更
+
+#### 1. Token 统计正式进入事件与 trace
+- `src/deep_research_agent/models.py`
+  - `AssistantResponse` 新增：
+    - `prompt_tokens`
+    - `completion_tokens`
+    - `total_tokens`
+- `src/deep_research_agent/dashscope_backend.py`
+  - 从 API 响应读取 usage 并回填到 `AssistantResponse`
+- `src/deep_research_agent/agent.py`
+  - `model_request` 记录 `input_tokens_estimated`
+  - `model_response` 记录：
+    - `prompt_tokens_api`
+    - `output_tokens`
+    - `total_tokens_api`
+- `src/deep_research_agent/logging.py`
+  - `trace.md` 的 `思考输入` 显示估算输入 token
+  - `trace.md` 的 `模型响应` 显示 API 输入/输出/总 token
+
+#### 2. 清理不再重要的上下文残留
+- `src/deep_research_agent/context_manager.py`
+  - 删除未再使用的字段和辅助函数：
+    - `_soft_context_target_tokens`
+    - `_turns_since_last_fs_list`
+    - `_render_todo_block`
+    - `_render_text_block`
+    - `_collect_file_manifest`
+    - `_extract_first_heading`
+    - `_default_memory_overview`
+  - `ContextPack` 去掉不再有意义的旧字段：
+    - `phase`
+    - `subgoal`
+    - `evidence_summary`
+    - `checkpoint_summary`
+- `src/deep_research_agent/agent.py`
+  - 删除对已废弃 `todo_manage` 的分支判断
+
+#### 3. 回归测试
+- `tests/test_logging.py`
+  - 新增 token 使用情况展示断言
+- `tests/test_agent_loop.py`
+  - 新增 `model_request.input_tokens_estimated` 断言
+
+### 真实运行记录
+
+- 长 query eval：
+  - session: `20260423T123409Z_8adc31fe_883830`
+  - run: `20260423T203409_f2a36207`
+  - stop_reason: `max_turns_exceeded`
+- 已生成：
+  - `token_usage.json`
+  - `token_usage.csv`
+  - `token_usage.svg`
+- 关键观察：
+  - 估算输入 token 已明显压低到约 `301`–`696`/turn
+  - 但 API `prompt_tokens` 仍然很高，峰值达到 `48506`
+  - 说明当前主要压力已不在 `context_prompt`，而在对话尾部和长工具结果进入消息历史
+
+### 验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_logging.py tests/test_agent_loop.py tests/test_context_manager.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
 ## 2026-04-23 (by Codex) — 上下文策略回收：连续对话优先，任务落文件，后续只给增量提示
 
 ### 本轮目标
