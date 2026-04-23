@@ -1,5 +1,81 @@
 # CHANGELOG
 
+## 2026-04-23 (by Kimi) — 自然消息流 + 工具结果摘要化
+
+### 本轮目标
+
+通过对比 law_agent 的成功 eval 日志，诊断并修复 deep_research_agent 的核心架构问题：
+1. 人工上下文拼接替代了自然对话历史，导致模型无法利用 KV cache
+2. 工具结果（jina_reader 20k+ chars、web_search 18k+ chars）挤占上下文窗口
+3. 消息截断破坏连续性
+
+### 核心变更
+
+#### 1. 工具结果摘要化
+- `src/deep_research_agent/tools.py`
+  - `web_search`: Tavily 返回的 `content` 截断到 300 字符/条
+  - `jina_reader`: 返回内容截断到 800 字符，完整内容仍归档到 `research/raw/`
+  - `jina_reader` firecrawl fallback 同样截断到 800 字符
+  - 模型需要全文时通过 `fs_read` 主动读取
+
+#### 2. 自然消息流替代人工上下文拼接
+- `src/deep_research_agent/agent.py`
+  - 移除 `context_pack.rendered_prompt` 每轮重新注入
+  - 消息数组自然增长：`system → user → assistant → tool → user → assistant → ...`
+  - 移除 `_compact_conversation_tail` 消息截断逻辑
+  - 首轮 user 消息只包含任务 + 轻量引导
+  - 工具结果后追加 `"Continue."` user 消息驱动下一轮思考
+  - `max_turns` 默认值从 6 提升到 12
+
+#### 3. ContextManager 调整
+- `src/deep_research_agent/context_manager.py`
+  - `_ensure_task_file` 重命名为 `ensure_task_file`（public）
+
+#### 4. 测试更新
+- `tests/test_agent_loop.py`
+  - 移除 `_compact_conversation_tail` 测试
+  - 新增自然消息历史增长测试
+- `tests/test_context_manager.py`
+  - 更新以适应新的消息流结构
+
+### Eval 验证
+
+**Before（原始 eval）:**
+- 12 轮 max_turns_exceeded
+- Token 峰值：Turn 5=32k, Turn 6=48k
+- jina_reader 返回 20k-40k chars
+- TODO 从未更新
+
+**After（本次改动）:**
+- 12 轮 max_turns_exceeded（但原因不同）
+- Token 峰值：Turn 12=49k（增长更线性，无突发暴涨）
+- jina_reader 返回 ~1.3k chars ✓
+- web_search 返回 ~5k chars ✓
+- 8 篇 raw 文件归档，source_index.md 创建
+- TODO 创建但未勾选（模型持续搜索/阅读，未转入写作）
+
+### 关键发现
+
+**已修复的问题：**
+- 工具结果大小控制有效（jina 从 20k+ 降到 1.3k）
+- 自然消息流工作正常（消息数从 2 增长到 53）
+- 模型能看到自己的 reasoning 历史
+
+**未修复的问题（Skill/Prompt 层）：**
+- 模型在 Turn 12 仍在 `fs_read` 25k 字符的 raw 文件
+- 模型从未写入 notes 或 report
+- TODO 项从未勾选完成
+- 根本原因是模型缺乏"停止搜索、开始写作"的信号
+
+### 下一步
+
+需要在 Skill 或 System Prompt 层增加：
+1. 明确的阶段切换指导（研究 → 写作）
+2. 更强的 TODO 闭合约束
+3. 防止无限 `fs_read` 大文件的机制
+
+---
+
 ## 2026-04-23 (by Codex) — Token 统计落日志 + 清理上下文残留 + 长 Query 运行画像
 
 ### 本轮目标
