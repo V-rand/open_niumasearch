@@ -116,7 +116,6 @@ def build_builtin_tools(
     registry = ToolRegistry()
     workspace_root = Path(workspace_root).resolve()
     http_client = http_client or httpx.Client(timeout=60.0, trust_env=True)
-    _ensure_memory_file(workspace_root)
 
     def resolve_path(raw_path: str) -> Path:
         path = (workspace_root / raw_path).resolve()
@@ -190,19 +189,6 @@ def build_builtin_tools(
 
         if mode == "create_only" and path.exists():
             raise FileExistsError(f"File already exists: {path}")
-        existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
-        if mode == "append":
-            next_text = existing_text + content
-        else:
-            next_text = content
-
-        relative_path = str(path.relative_to(workspace_root))
-        if relative_path in {"todo.md", "research/todo.md", "writing/todo.md"}:
-            closure_errors = _validate_todo_closure_attempts(next_text)
-            if closure_errors:
-                raise ValueError(
-                    "TODO closure attempt validation failed: " + "; ".join(closure_errors)
-                )
 
         if mode == "append":
             with path.open("a", encoding="utf-8") as handle:
@@ -211,7 +197,7 @@ def build_builtin_tools(
             path.write_text(content, encoding="utf-8")
 
         return {
-            "path": relative_path,
+            "path": str(path.relative_to(workspace_root)),
             "bytes_written": len(content.encode("utf-8")),
         }
 
@@ -252,65 +238,6 @@ def build_builtin_tools(
             "path": str(path.relative_to(workspace_root)),
             "replaced_count": replaced_count,
         }
-
-    def todo_manage(arguments: dict[str, Any]) -> dict[str, Any]:
-        todo_path = resolve_path("todo.md")
-        action = arguments["action"]
-
-        if action == "init":
-            title = arguments["title"].strip()
-            goal = arguments["goal"].strip()
-            tasks = [str(item).strip() for item in arguments.get("tasks", []) if str(item).strip()]
-            overwrite = bool(arguments.get("overwrite", False))
-            if todo_path.exists() and not overwrite:
-                raise FileExistsError("todo.md already exists; set overwrite=true to replace it")
-            text = _render_todo_template(title=title, goal=goal, tasks=tasks)
-            closure_errors = _validate_todo_closure_attempts(text)
-            if closure_errors:
-                raise ValueError("TODO closure attempt validation failed: " + "; ".join(closure_errors))
-            todo_path.write_text(text, encoding="utf-8")
-            return {"path": "todo.md", "action": action, "task_count": len(tasks)}
-
-        if not todo_path.exists():
-            raise FileNotFoundError("todo.md does not exist; use action=init first")
-
-        text = todo_path.read_text(encoding="utf-8")
-        updated = text
-        if action == "add":
-            item_text = arguments["item_text"].strip()
-            position = arguments.get("position", "end")
-            after_text = str(arguments.get("after_text", "")).strip()
-            updated = _todo_add_item(text, item_text=item_text, position=position, after_text=after_text)
-        elif action == "edit":
-            updated = _todo_edit_item(
-                text,
-                target_text=arguments["target_text"].strip(),
-                new_text=arguments["new_text"].strip(),
-            )
-        elif action == "set_status":
-            updated = _todo_set_status(
-                text,
-                target_text=arguments["target_text"].strip(),
-                status=arguments["status"].strip(),
-            )
-        elif action == "delete":
-            updated = _todo_delete_item(text, target_text=arguments["target_text"].strip())
-        elif action == "append_closure":
-            updated = _todo_append_closure(
-                text,
-                target_text=arguments["target_text"].strip(),
-                conclusion=arguments["conclusion"].strip(),
-                evidence=arguments["evidence"].strip(),
-                open_items=str(arguments.get("open_items", "")).strip(),
-            )
-        else:
-            raise ValueError(f"Unsupported todo action: {action}")
-
-        closure_errors = _validate_todo_closure_attempts(updated)
-        if closure_errors:
-            raise ValueError("TODO closure attempt validation failed: " + "; ".join(closure_errors))
-        todo_path.write_text(updated, encoding="utf-8")
-        return {"path": "todo.md", "action": action}
 
     def web_search(arguments: dict[str, Any]) -> dict[str, Any]:
         api_key = os.getenv("TAVILY_API_KEY")
@@ -366,6 +293,22 @@ def build_builtin_tools(
         }
 
     def jina_reader(arguments: dict[str, Any]) -> dict[str, Any]:
+        url = arguments["url"]
+        
+        # --- Deduplication Check ---
+        existing = _find_existing_raw_source(workspace_root, url)
+        if existing:
+            return {
+                "url": url,
+                "provider": "cache_lookup",
+                "status": "already_read",
+                "raw_path": existing["raw_path"],
+                "content": f"NOTICE: This URL has already been read and archived at {existing['raw_path']}. "
+                           f"Please use fs_read to access the full content. Do not call reading tools for this URL again.",
+                "title": existing["title"]
+            }
+        # ---------------------------
+
         api_key = os.getenv("JINA_API_KEY")
         if not api_key:
             raise RuntimeError("JINA_API_KEY is not set")
@@ -605,39 +548,6 @@ def build_builtin_tools(
                 "required": ["path", "operation", "target", "content"],
             },
             handler=fs_patch,
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="todo_manage",
-            description="Create and maintain todo.md as the single task control panel. Use this instead of freehand fs_write when creating, adding, editing, reprioritizing, closing, or deleting TODO items.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["init", "add", "edit", "set_status", "delete", "append_closure"],
-                    },
-                    "title": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "tasks": {"type": "array", "items": {"type": "string"}},
-                    "overwrite": {"type": "boolean"},
-                    "item_text": {"type": "string"},
-                    "position": {"type": "string", "enum": ["top", "end", "after"]},
-                    "after_text": {"type": "string"},
-                    "target_text": {"type": "string"},
-                    "new_text": {"type": "string"},
-                    "status": {
-                        "type": "string",
-                        "enum": ["open", "in_progress", "tentatively_resolved", "closed", "deferred", "abandoned"],
-                    },
-                    "conclusion": {"type": "string"},
-                    "evidence": {"type": "string"},
-                    "open_items": {"type": "string"},
-                },
-                "required": ["action"],
-            },
-            handler=todo_manage,
         )
     )
     registry.register(
@@ -1042,11 +952,12 @@ def _download_pdf_to_workspace(
     http_client: httpx.Client,
     filename_hint: str | None = None,
 ) -> Path:
+    token_url = url.split("?")[0]
     response = http_client.get(url, follow_redirects=True)
     response.raise_for_status()
     pdf_dir = _document_store_dir(workspace_root)
     pdf_dir.mkdir(parents=True, exist_ok=True)
-    filename = filename_hint or _suggest_pdf_filename(url)
+    filename = filename_hint or _suggest_pdf_filename(token_url)
     pdf_path = pdf_dir / filename
     pdf_path.write_bytes(response.content)
     return pdf_path
@@ -1314,170 +1225,10 @@ def _judgment_for_url(url: str) -> str:
     return "medium"
 
 
-def _validate_todo_closure_attempts(text: str) -> list[str]:
-    lines = text.splitlines()
-    errors: list[str] = []
-
-    for index, raw_line in enumerate(lines):
-        line = raw_line.strip()
-        if not line.startswith("- [x] closed:"):
-            continue
-
-        closure_window: list[str] = []
-        for sub_line in lines[index + 1 :]:
-            stripped = sub_line.strip()
-            if stripped.startswith("- ["):
-                break
-            if stripped.startswith("## "):
-                break
-            if stripped.startswith("-"):
-                closure_window.append(stripped)
-
-        if not _has_closure_field(closure_window, "结论", "conclusion"):
-            errors.append(f"Missing closure conclusion near line {index + 1}")
-        if not _has_closure_field(closure_window, "依据", "evidence"):
-            errors.append(f"Missing closure evidence near line {index + 1}")
-        if not _has_closure_field(closure_window, "未决项", "open items"):
-            errors.append(f"Missing closure open-items near line {index + 1}")
-
-    return errors
-
-
-def _has_closure_field(lines: list[str], cn_key: str, en_key: str) -> bool:
-    for line in lines:
-        normalized = line.lower()
-        if f"{cn_key}：" in line or f"{cn_key}:" in line:
-            return True
-        if f"{en_key}:" in normalized:
-            return True
-    return False
-
-
-def _ensure_memory_file(workspace_root: Path) -> None:
-    path = workspace_root / "Memory.md"
-    if path.exists():
-        return
-    path.write_text(_default_memory_markdown(), encoding="utf-8")
-
-
-def _default_memory_markdown() -> str:
-    return (
-        "# Workspace Memory\n\n"
-        "- `todo.md`: 唯一任务控制面板。开始新一轮工作前先读取；出现实质推进后优先更新。\n"
-        "- `research/source_index.md`: 已采纳来源表。先看这里判断哪些来源值得继续深读。\n"
-        "- `research/raw/`: 深读后落下的原始材料。长文优先按路径回读，不要依赖聊天摘要。\n"
-        "- `research/notes/`: 按主题整理的研究笔记。\n"
-        "- `research/evidence/`: 按 claim 整理的证据记录。\n"
-        "- `writing/drafts/`: 分节草稿。\n"
-        "- `research/report.md`: 最终整合报告。\n\n"
-        "## 工作约定\n\n"
-        "- 优先用 `todo_manage` 维护 `todo.md`，需要精细编辑时再用 `fs_write` / `fs_patch`。\n"
-        "- 优先用 `fs_read` 按路径读取已有文件，再决定是否继续搜索或深读。\n"
-        "- 搜索工具负责发现并采纳来源；阅读工具负责补全 `research/raw/`。\n"
-    )
-
-
-def _render_todo_template(*, title: str, goal: str, tasks: list[str]) -> str:
-    task_lines = "\n".join(f"- [ ] open: {item}" for item in tasks) or "- [ ] open: 补充任务"
-    return (
-        f"# {title}\n\n"
-        "## 目标\n"
-        f"{goal}\n\n"
-        "## 任务列表\n\n"
-        f"{task_lines}\n"
-    )
-
-
-def _todo_add_item(text: str, *, item_text: str, position: str, after_text: str) -> str:
-    new_line = f"- [ ] open: {item_text}"
-    lines = text.splitlines()
-    task_line_indexes = [index for index, line in enumerate(lines) if _is_todo_item_line(line)]
-    if position == "top":
-        if task_line_indexes:
-            lines.insert(task_line_indexes[0], new_line)
-        else:
-            lines.extend(["", "## 任务列表", "", new_line])
-        return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    if position == "after":
-        for index, line in enumerate(lines):
-            if after_text and after_text in line and _is_todo_item_line(line):
-                lines.insert(index + 1, new_line)
-                return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-        raise ValueError(f"Could not find TODO item containing: {after_text}")
-
-    if task_line_indexes:
-        insert_at = task_line_indexes[-1] + 1
-        while insert_at < len(lines) and lines[insert_at].startswith("  - "):
-            insert_at += 1
-        lines.insert(insert_at, new_line)
-    else:
-        lines.extend(["", "## 任务列表", "", new_line])
-    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-
-
-def _todo_edit_item(text: str, *, target_text: str, new_text: str) -> str:
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if _is_todo_item_line(line) and target_text in line:
-            prefix, _, _ = line.partition(":")
-            lines[index] = f"{prefix}: {new_text}"
-            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    raise ValueError(f"Could not find TODO item containing: {target_text}")
-
-
-def _todo_set_status(text: str, *, target_text: str, status: str) -> str:
-    lines = text.splitlines()
-    checkbox = "x" if status == "closed" else " "
-    for index, line in enumerate(lines):
-        if _is_todo_item_line(line) and target_text in line:
-            _, _, description = line.partition(":")
-            lines[index] = f"- [{checkbox}] {status}: {description.strip()}"
-            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    raise ValueError(f"Could not find TODO item containing: {target_text}")
-
-
-def _todo_delete_item(text: str, *, target_text: str) -> str:
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if _is_todo_item_line(line) and target_text in line:
-            del lines[index]
-            while index < len(lines) and lines[index].startswith("  - "):
-                del lines[index]
-            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    raise ValueError(f"Could not find TODO item containing: {target_text}")
-
-
-def _todo_append_closure(
-    text: str,
-    *,
-    target_text: str,
-    conclusion: str,
-    evidence: str,
-    open_items: str,
-) -> str:
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if _is_todo_item_line(line) and target_text in line:
-            insert_at = index + 1
-            while insert_at < len(lines) and lines[insert_at].startswith("  - "):
-                insert_at += 1
-            lines[insert_at:insert_at] = [
-                f"  - 结论：{conclusion}",
-                f"  - 依据：{evidence}",
-                f"  - 未决项：{open_items or '-'}",
-            ]
-            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    raise ValueError(f"Could not find TODO item containing: {target_text}")
-
-
-def _is_todo_item_line(line: str) -> bool:
-    return bool(re.match(r"^- \[[ x]\] [a-z_]+:", line.strip()))
-
-
 def _resolve_firecrawl_api_key() -> str | None:
     return (
         os.getenv("FIRECRAWL_API_KEY")
-        or os.getenv("FIRECRAW_API_KEY")
+        or os.getenv("FIRECRAWL_API_KEY")
         or os.getenv("firecraw_api_key")
     )
 
@@ -1525,3 +1276,39 @@ def _firecrawl_scrape_fallback(
         "fallback_reason": f"{type(jina_error).__name__}: {jina_error}",
         **archived,
     }
+
+def _find_existing_raw_source(workspace_root: Path, url: str) -> dict[str, str] | None:
+    """Check research/source_index.md for a given URL and verify if the raw file exists."""
+    index_path = workspace_root / "research" / "source_index.md"
+    if not index_path.exists():
+        return None
+
+    # Very simple parsing: look for lines that contain the URL and then look for raw_path:
+    # This is a bit brittle but follows our Markdown contract.
+    content = index_path.read_text(encoding="utf-8")
+    
+    # Each entry in source_index.md looks like a block
+    # We'll split by the common separator if we had one, but let's just use regex for the URL
+    # and then find the nearest raw_path.
+    
+    # Escaping URL for regex
+    import re
+    url_pattern = re.escape(url)
+    
+    # Try to find the block containing this URL
+    # We assume blocks are separated by horizontal rules or headers
+    blocks = re.split(r'\n---|\n# ', content)
+    for block in blocks:
+        if url in block:
+            # Extract raw_path: research/raw/...
+            path_match = re.search(r'raw_path:\s*(research/raw/[^\s\n]+)', block)
+            title_match = re.search(r'title:\s*(.*)', block)
+            if path_match:
+                raw_path = path_match.group(1).strip()
+                full_path = workspace_root / raw_path
+                if full_path.exists():
+                    return {
+                        "raw_path": raw_path,
+                        "title": title_match.group(1).strip() if title_match else "Unknown"
+                    }
+    return None

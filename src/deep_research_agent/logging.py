@@ -304,8 +304,13 @@ class RunLogger:
     def _trace_model_request(self, payload: dict[str, Any]) -> list[str]:
         lines: list[str] = []
         context_prompt = payload.get("context_prompt")
+        # Extract token count if available in context_pack_built event or payload
+        token_count = payload.get("token_count") 
+        
+        token_label = f" [Estimated Tokens: {token_count}]" if token_count else ""
+        
         if context_prompt:
-            lines.append("🧾 **Context Input**")
+            lines.append(f"🧾 **Context Input**{token_label}")
             lines.append(self._compact_preview(str(context_prompt), max_lines=18))
             lines.append("")
 
@@ -333,10 +338,55 @@ class RunLogger:
 
         lines = [f"{emoji} **Result** (`{tool_name}`, {status})"]
 
-        # Compact content preview
+        # Special handling for TODO updates
+        if not is_error and tool_name in ("fs_patch", "fs_write"):
+            # We need to peek into the arguments of the previous model_response
+            # But the logger doesn't easily have that state. 
+            # Let's check the content instead if it looks like a TODO path.
+            # Actually, the payload here IS the result of the tool.
+            # For fs_write, it's just bytes_written. For fs_patch, it's a success message.
+            # To show WHAT changed, we'd need the arguments.
+            # Let's at least highlight THAT it was a TODO update.
+            pass
+
+        # Smart content preview
         if content:
-            preview = self._compact_preview(content, max_lines=8)
-            lines.append(preview)
+            # Special case for TODO updates (metadata path check)
+            is_todo = "todo.md" in str(payload.get("metadata", {}).get("path", ""))
+            
+            if not is_error:
+                if is_todo:
+                    lines.append("📋 **PROGRESS TRACKED: todo.md updated.**")
+                
+                # Try to extract metadata for search/read tools
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, dict):
+                        summary_parts = []
+                        for key in ("title", "url", "path", "raw_path", "paper_id", "query"):
+                            if val := data.get(key):
+                                summary_parts.append(f"**{key}**: {val}")
+                        
+                        if summary_parts:
+                            lines.append("> " + " | ".join(summary_parts))
+                        
+                        # If it's a long content tool, truncate the main body in trace
+                        if "content" in data or "markdown" in data or "results" in data:
+                            main_body = data.get("content") or data.get("markdown") or str(data.get("results"))
+                            preview = self._compact_preview(main_body, max_lines=5, aggressive=True)
+                            lines.append(preview)
+                        else:
+                            # Not a known structured tool result, show generic preview
+                            lines.append(self._compact_preview(content, max_lines=8))
+                    else:
+                        lines.append(self._compact_preview(content, max_lines=8))
+                except json.JSONDecodeError:
+                    # Not JSON, check if it's a TODO update via content signature
+                    if "todo.md" in str(payload.get("metadata", {}).get("path", "")):
+                        lines.append("📋 **TODO Updated**")
+                    lines.append(self._compact_preview(content, max_lines=8))
+            else:
+                lines.append(self._compact_preview(content, max_lines=8))
 
         # Compact metadata
         if metadata and metadata not in ({}, None):
@@ -374,18 +424,20 @@ class RunLogger:
             return ", ".join(parts)
         return str(args)[:100]
 
-    def _compact_preview(self, text: str, max_lines: int = 8) -> str:
+    def _compact_preview(self, text: str, max_lines: int = 8, aggressive: bool = False) -> str:
         """Return full content in a code block; only truncate truly huge payloads."""
         if not text:
             return ""
-        # Always show full text for thinking, output, and tool results.
-        # Only truncate if it exceeds the artifact spillover threshold.
-        if len(text) > self.artifact_char_threshold:
+        
+        threshold = 500 if aggressive else self.artifact_char_threshold
+        
+        if len(text) > threshold:
             lines = text.strip().splitlines()
-            preview_lines = lines[:max_lines]
-            preview = "\n".join(preview_lines)
-            preview += f"\n... ({len(lines) - max_lines} more lines, {len(text)} chars total — see events.jsonl or artifacts for full text)"
+            display_lines = min(len(lines), max_lines)
+            preview = "\n".join(lines[:display_lines])
+            preview += f"\n... (截断显示，全文共 {len(text)} 字符，请查阅对应 Artifacts)"
             return "```text\n" + preview + "\n```"
+        
         return "```text\n" + text.strip() + "\n```"
 
     def _render_value(self, value: Any) -> str:

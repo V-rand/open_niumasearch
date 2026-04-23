@@ -77,61 +77,6 @@ def test_build_builtin_tools_creates_memory_file(tmp_path, is_fast_mode: bool) -
     assert "todo.md" in memory_path.read_text(encoding="utf-8")
 
 
-def test_todo_manage_initializes_and_updates_todo(tmp_path, is_fast_mode: bool) -> None:
-    if is_fast_mode:
-        pass
-
-    registry = build_builtin_tools(workspace_root=tmp_path)
-    init_result = registry.invoke(
-        "todo_manage",
-        {
-            "action": "init",
-            "title": "Demo Research",
-            "goal": "完成结构化研究报告",
-            "tasks": ["建立来源索引", "完成初稿"],
-        },
-    )
-    assert init_result.is_error is False
-
-    add_result = registry.invoke(
-        "todo_manage",
-        {
-            "action": "add",
-            "item_text": "补证关键结论",
-            "position": "after",
-            "after_text": "建立来源索引",
-        },
-    )
-    assert add_result.is_error is False
-
-    closure_result = registry.invoke(
-        "todo_manage",
-        {
-            "action": "append_closure",
-            "target_text": "建立来源索引",
-            "conclusion": "来源索引已建立",
-            "evidence": "research/source_index.md",
-            "open_items": "部分来源待深读",
-        },
-    )
-    assert closure_result.is_error is False
-
-    close_result = registry.invoke(
-        "todo_manage",
-        {
-            "action": "set_status",
-            "target_text": "建立来源索引",
-            "status": "closed",
-        },
-    )
-    assert close_result.is_error is False
-
-    todo_text = (tmp_path / "todo.md").read_text(encoding="utf-8")
-    assert "补证关键结论" in todo_text
-    assert "- [x] closed: 建立来源索引" in todo_text
-    assert "依据：research/source_index.md" in todo_text
-
-
 class _FakeResponse:
     def __init__(self, data: dict | None = None, text: str | None = None, status_code: int = 200) -> None:
         self._data = data

@@ -48,22 +48,8 @@ def test_load_unified_todo_skill_from_repo(is_fast_mode: bool) -> None:
 
     assert len(loaded) == 1
     assert loaded[0].name == "todo"
-    assert "Unified TODO" in loaded[0].content
-    assert "closed" in loaded[0].content
-    assert "Closure Attempt" in loaded[0].content
-    assert "没有调查就没有发言权" in loaded[0].content
-
-
-def test_load_unified_todo_skill_mentions_writing_feedback_loop(is_fast_mode: bool) -> None:
-    if is_fast_mode:
-        pass
-
-    loaded = load_repo_skills(["todo"])
-
-    assert len(loaded) == 1
-    assert loaded[0].name == "todo"
-    assert "写作过程中如果发现" in loaded[0].content
-    assert "补证" in loaded[0].content
+    assert "FIREWALL" in loaded[0].content
+    assert "fs_patch" in loaded[0].content
 
 
 def test_load_same_todo_skill_multiple_times(is_fast_mode: bool) -> None:

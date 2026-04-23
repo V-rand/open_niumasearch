@@ -92,6 +92,7 @@ class ReActAgent:
                     "phase": context_pack.phase,
                     "subgoal": context_pack.subgoal,
                     "block_char_counts": context_pack.block_char_counts,
+                    "token_count": context_pack.token_count,
                     "trimmed_blocks": context_pack.trimmed_blocks,
                 },
             )
@@ -119,6 +120,7 @@ class ReActAgent:
                     "system_prompt_path": system_prompt_path,
                     "skill_paths": normalized_skill_paths,
                     "context_prompt": context_pack.rendered_prompt,
+                    "token_count": context_pack.token_count,
                     "conversation_tail": _summarize_conversation_tail_for_log(conversation_tail),
                     "tool_names": self.tool_registry.tool_names(),
                     "effective_tool_choice": effective_tool_choice,
@@ -205,13 +207,45 @@ class ReActAgent:
         )
 
     def _dispatch_tool_calls(self, tool_calls: list[ToolCall]) -> list[ToolExecutionResult]:
-        if len(tool_calls) == 1 or not self.config.parallel_tool_calls:
+        if not self.config.parallel_tool_calls:
             return [self._run_single_tool_call(tool_calls[0])]
 
-        max_workers = min(len(tool_calls), self.config.max_parallel_tools)
+        # Deduplicate URLs in parallel calls to prevent redundant downloads/reads
+        seen_urls: set[str] = set()
+        deduplicated_calls: list[ToolCall] = []
+        results: list[ToolExecutionResult] = []
+        
+        # Mapping to keep track of which call IDs get which results
+        call_id_to_result: dict[str, ToolExecutionResult] = {}
+
+        for tc in tool_calls:
+            url = str(tc.arguments.get("url") or tc.arguments.get("paper_ref") or "")
+            if url and tc.name in ("jina_reader", "pdf_read_url", "arxiv_read_paper", "mineru_parse_url"):
+                if url in seen_urls:
+                    # Mark as redundant
+                    call_id_to_result[tc.id] = ToolExecutionResult(
+                        name=tc.name,
+                        call_id=tc.id,
+                        content=f"Skipped redundant call to {url}. This URL is already being processed in this turn.",
+                        is_error=False,
+                        metadata={"status": "deduplicated"}
+                    )
+                    continue
+                seen_urls.add(url)
+            deduplicated_calls.append(tc)
+
+        if not deduplicated_calls:
+            return list(call_id_to_result.values())
+
+        max_workers = min(len(deduplicated_calls), self.config.max_parallel_tools)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self._run_single_tool_call, tool_call) for tool_call in tool_calls]
-            return [future.result() for future in futures]
+            futures = [executor.submit(self._run_single_tool_call, tc) for tc in deduplicated_calls]
+            executed_results = [future.result() for future in futures]
+            
+        # Re-assemble the full list of results in original order if possible, 
+        # or just combine them.
+        final_results = executed_results + list(call_id_to_result.values())
+        return final_results
 
     def _run_single_tool_call(self, tool_call: ToolCall) -> ToolExecutionResult:
         return self.tool_registry.invoke(

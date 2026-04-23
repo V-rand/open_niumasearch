@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+try:
+    import tiktoken
+    _TOKENIZER = tiktoken.get_encoding("cl100k_base")
+except ImportError:
+    _TOKENIZER = None
+
 if TYPE_CHECKING:
     from deep_research_agent.logging import RunLogger
 
@@ -23,6 +29,7 @@ class ContextPack:
     observations_summary: str
     rendered_prompt: str
     block_char_counts: dict[str, int]
+    token_count: int
     trimmed_blocks: list[str]
 
 
@@ -36,13 +43,26 @@ class ContextManager:
         self.workspace_root = Path(workspace_root).resolve()
         self.logger = logger
         self._recent_observations: deque[str] = deque(maxlen=4)
-        self._soft_context_target_chars = 180_000
+        self._soft_context_target_tokens = 100_000 # Aim for 100k safety buffer
         self._stale_todo_turns = 0
+        self._turns_since_last_fs_list = 0
+
+    def estimate_tokens(self, text: str) -> int:
+        if _TOKENIZER:
+            return len(_TOKENIZER.encode(text, disallowed_special=()))
+        # Heuristic: 1 token approx 3 chars for English, 0.6 chars for Chinese
+        # We'll use a conservative 1 token per 2 characters
+        return len(text) // 2
 
     def record_tool_observation(self, tool_name: str, content: str, *, is_error: bool) -> None:
         status = "error" if is_error else "ok"
         compact = self._summarize_tool_observation(content)
         self._recent_observations.append(f"- [{status}] {tool_name}: {compact}")
+        
+        if tool_name == "fs_list":
+            self._turns_since_last_fs_list = 0
+        else:
+            self._turns_since_last_fs_list += 1
 
     def record_turn_progress(self, *, used_tools: bool, updated_todo: bool) -> None:
         if updated_todo:
@@ -68,9 +88,12 @@ class ContextManager:
         turn_index: int | None = None,
         max_turns: int | None = None,
     ) -> ContextPack:
-        del turn_index, max_turns
+        # 1. Read the real todo.md
+        todo_text = self._read_text("todo.md") or "- 暂无 todo.md，请尽快初始化它。"
+        
+        # 2. Optimized Workspace Map: Only show last 5 modifications
+        recent_files = self._build_recent_workspace_map()
 
-        memory_text = self._read_text("Memory.md") or self._default_memory_overview()
         observations_summary = "\n".join(self._recent_observations) if self._recent_observations else "- 暂无最近工具观察"
         todo_reminder = self._build_todo_reminder()
 
@@ -78,42 +101,31 @@ class ContextManager:
             "input_task": user_input.strip(),
             "phase": "agent_managed",
             "subgoal": "",
-            "todo_slice": self._render_text_block(memory_text, default="- 暂无 Memory.md"),
+            "todo_slice": todo_text,
             "sources_summary": todo_reminder,
-            "notes_summary": "",
+            "notes_summary": recent_files,
             "evidence_summary": "",
             "checkpoint_summary": "",
             "observations_summary": observations_summary,
             "raw_sources": "",
         }
-        block_char_counts = {key: len(value) for key, value in sections.items()}
-        trimmed_blocks: list[str] = []
-
-        total_chars = sum(block_char_counts.values())
-        if total_chars > self._soft_context_target_chars:
-            for key in (
-                "sources_summary",
-                "notes_summary",
-                "evidence_summary",
-                "checkpoint_summary",
-                "raw_sources",
-            ):
-                original = sections[key]
-                compact = self._compact_text(original, max_chars=6_000)
-                if compact != original:
-                    sections[key] = compact
-                    trimmed_blocks.append(key)
-            block_char_counts = {key: len(value) for key, value in sections.items()}
-
+        
         rendered = (
-            "# 工作上下文\n\n"
-            f"## 当前任务\n{sections['input_task']}\n\n"
-            f"## Workspace Memory\n{sections['todo_slice']}\n\n"
-            f"## TODO Reminder\n{sections['sources_summary']}\n\n"
+            "--- 核心任务锚点 (STRICT ADHERENCE REQUIRED) ---\n"
+            f"{sections['input_task']}\n"
+            "--------------------------------------------\n\n"
+            f"## 当前进度 (todo.md)\n{sections['todo_slice']}\n\n"
+            f"## 工作区最近动态 (Recent Changes)\n{sections['notes_summary']}\n\n"
+            f"## 关键提醒\n{sections['sources_summary']}\n\n"
             f"## 最近工具观察\n{sections['observations_summary']}\n\n"
-            "请先读取并推进真实文件，再决定是否继续搜索、深读、写作或补证。"
-            " 优先使用 `todo_manage` 或文件工具维护 `todo.md`，并通过 `fs_read` 动态读取 Memory 中列出的路径。"
+            "**行动准则**：\n"
+            "1. 严禁重复阅读相同 URL。\n"
+            "2. 每一条笔记必须包含 [原文引用] 和 [冲突与互补]。\n"
+            "3. 任何实质进展必须立即更新 todo.md。"
         )
+        
+        token_count = self.estimate_tokens(rendered)
+        
         return ContextPack(
             phase=sections["phase"],
             subgoal=sections["subgoal"],
@@ -124,9 +136,25 @@ class ContextManager:
             checkpoint_summary=sections["checkpoint_summary"],
             observations_summary=sections["observations_summary"],
             rendered_prompt=rendered,
-            block_char_counts=block_char_counts,
-            trimmed_blocks=trimmed_blocks,
+            block_char_counts={k: len(v) for k, v in sections.items()},
+            token_count=token_count,
+            trimmed_blocks=[],
         )
+
+    def _build_recent_workspace_map(self) -> str:
+        """Build a very compact list of the last 5 modified files."""
+        all_md_files = list(self.workspace_root.rglob("*.md"))
+        if not all_md_files:
+            return "- 工作区目前为空。"
+        
+        # Sort by modification time
+        all_md_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        
+        lines = ["最近修改的文件："]
+        for f in all_md_files[:5]:
+            rel = f.relative_to(self.workspace_root)
+            lines.append(f"- {rel}")
+        return "\n".join(lines)
 
     def _read_text(self, relative_path: str) -> str:
         path = self.workspace_root / relative_path
