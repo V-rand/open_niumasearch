@@ -269,15 +269,21 @@ def build_builtin_tools(
         response.raise_for_status()
         data = response.json()
 
-        results = [
-            {
+        raw_results = data.get("results", [])
+        # Summarize: keep title/url/score, truncate content to 300 chars
+        results = []
+        for item in raw_results:
+            content = item.get("content") or ""
+            summary = content
+            if len(summary) > 300:
+                summary = summary[:300].rstrip() + "..."
+            results.append({
                 "title": item.get("title"),
                 "url": item.get("url"),
-                "content": item.get("content"),
+                "content": summary,
                 "score": item.get("score"),
-            }
-            for item in data.get("results", [])
-        ]
+            })
+
         kept_sources = _keep_selected_search_results(
             workspace_root=workspace_root,
             results=results,
@@ -339,21 +345,27 @@ def build_builtin_tools(
             response = http_client.post("https://r.jina.ai/", headers=headers, json=body)
             response.raise_for_status()
             data = response.json().get("data", {})
+            full_content = data.get("content", "")
             archived = _archive_source_content(
                 workspace_root=workspace_root,
                 title=data.get("title") or arguments["url"],
                 url=arguments["url"],
-                content=data.get("content", ""),
+                content=full_content,
                 source_type="web",
-                summary_hint=data.get("content", ""),
+                summary_hint=full_content,
             )
+            # Return truncated summary to model; full content is in raw_path
+            summary = full_content
+            if len(summary) > 800:
+                summary = summary[:800].rstrip() + "..."
             return {
                 "title": data.get("title"),
                 "url": arguments["url"],
-                "content": data.get("content", ""),
+                "content": summary,
                 "links": data.get("links", []),
                 "images": data.get("images", []),
                 "provider": "jina",
+                "note": f"Full content archived at {archived.get('raw_path', 'research/raw/')}. Use fs_read to access.",
                 **archived,
             }
         except Exception as jina_exc:
