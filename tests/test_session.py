@@ -38,13 +38,13 @@ def test_run_eval_case_returns_stable_json_payload(tmp_path, is_fast_mode: bool)
         user_input="answer directly",
         sessions_dir=tmp_path / "sessions",
         model_backend=_StaticBackend(),
-        skill_names=["research-todo"],
+        skill_names=["todo"],
     )
 
     assert payload["final_answer"] == "benchmark final answer"
     assert payload["stop_reason"] == "final_answer"
     assert payload["turn_count"] == 1
-    assert payload["skills"] == ["research-todo"]
+    assert payload["skills"] == ["todo"]
     assert payload["session_id"]
     assert (tmp_path / "sessions" / payload["session_id"] / "workspace").exists()
     assert (tmp_path / "sessions" / payload["session_id"] / "logs").exists()

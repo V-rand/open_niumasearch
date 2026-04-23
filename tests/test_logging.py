@@ -41,7 +41,10 @@ def test_trace_groups_events_by_turn(tmp_path, is_fast_mode: bool) -> None:
 
     logger = RunLogger(base_dir=tmp_path / "logs")
     logger.log_event(event_type="run_start", payload={"user_input": "hello"})
-    logger.log_event(event_type="model_request", payload={"turn_index": 1, "messages": ["a"]})
+    logger.log_event(
+        event_type="model_request",
+        payload={"turn_index": 1, "context_prompt": "# 上下文包\n\nhello", "conversation_tail": []},
+    )
     logger.log_event(event_type="model_response", payload={"turn_index": 1, "content": "b"})
     logger.log_event(event_type="tool_result", payload={"turn_index": 2, "content": "c"})
 
@@ -50,8 +53,9 @@ def test_trace_groups_events_by_turn(tmp_path, is_fast_mode: bool) -> None:
     assert "## 启动" in trace_content
     assert "## Turn 1" in trace_content
     assert "## Turn 2" in trace_content
-    # model_request is suppressed in trace to reduce noise
     assert "### Event" not in trace_content
+    assert "🧾 **Context Input**" in trace_content
+    assert "# 上下文包" in trace_content
     assert "💬 **Output**" in trace_content
     assert "b" in trace_content
     assert "📄 **Result**" in trace_content
@@ -67,8 +71,9 @@ def test_trace_adds_visual_sections_for_common_events(tmp_path, is_fast_mode: bo
         event_type="model_request",
         payload={
             "turn_index": 1,
-            "messages": [{"role": "user", "content": "hello"}],
-            "tools": [{"type": "function", "function": {"name": "fs_read"}}],
+            "context_prompt": "# 上下文包\n\nhello",
+            "conversation_tail": [],
+            "tool_names": ["fs_read"],
         },
     )
     logger.log_event(
@@ -94,7 +99,8 @@ def test_trace_adds_visual_sections_for_common_events(tmp_path, is_fast_mode: bo
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
-    # model_request suppressed; model_response shows thinking + tool request
+    assert "🧾 **Context Input**" in trace_content
+    assert "hello" in trace_content
     assert "🤔 **Thinking**" in trace_content
     assert "Need to read a file first." in trace_content
     assert "🛠️ **Tool**: `fs_read`" in trace_content
@@ -139,19 +145,56 @@ def test_trace_omits_system_message_body_from_model_request(tmp_path, is_fast_mo
             "turn_index": 1,
             "system_prompt_path": "system_prompt.txt",
             "skill_paths": ["skills/todo-list.md"],
-            "messages": [
-                {"role": "system", "content": "very long system prompt body"},
-                {"role": "user", "content": "hello"},
-            ],
-            "tools": [],
+            "context_prompt": "hello",
+            "conversation_tail": [],
+            "tool_names": [],
         },
     )
 
     trace_content = (logger.run_dir / "trace.md").read_text(encoding="utf-8")
 
-    # model_request is suppressed in trace
     assert "very long system prompt body" not in trace_content
-    assert "**System Messages**" not in trace_content
+    assert "🧾 **Context Input**" in trace_content
+    assert "hello" in trace_content
+
+
+def test_logger_always_persists_model_request_context_prompt_and_uses_field_specific_names(
+    tmp_path, is_fast_mode: bool
+) -> None:
+    if is_fast_mode:
+        pass
+
+    logger = RunLogger(base_dir=tmp_path / "logs", artifact_char_threshold=20)
+    logger.log_event(
+        event_type="model_request",
+        payload={
+            "turn_index": 1,
+            "system_prompt_path": "system_prompt.txt",
+            "context_prompt": "short context",
+            "conversation_tail": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content_preview": "y" * 50,
+                }
+            ],
+        },
+    )
+
+    events = [
+        json.loads(line)
+        for line in (logger.run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    artifacts = events[0]["artifacts"]
+    artifact_paths = [item["artifact_path"] for item in artifacts]
+
+    assert artifact_paths == [
+        "artifacts/0001_model_request_payload_context_prompt.txt",
+        "artifacts/0002_model_request_payload_conversation_tail_0_content_preview.txt",
+    ]
+    assert all("system_prompt" not in path for path in artifact_paths)
+    context_artifact = logger.run_dir / artifact_paths[0]
+    assert context_artifact.read_text(encoding="utf-8") == "short context"
 
 
 def test_trace_renders_openai_style_assistant_tool_calls(tmp_path, is_fast_mode: bool) -> None:

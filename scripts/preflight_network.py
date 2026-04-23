@@ -22,6 +22,14 @@ def _mask(value: str | None) -> str:
     return value[:4] + "..." + value[-4:]
 
 
+def _resolve_firecrawl_key() -> str | None:
+    return (
+        os.getenv("FIRECRAWL_API_KEY")
+        or os.getenv("FIRECRAW_API_KEY")
+        or os.getenv("firecraw_api_key")
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Network preflight checks before real eval runs.")
     parser.add_argument("--timeout-seconds", type=float, default=20.0)
@@ -33,7 +41,7 @@ def main() -> int:
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY"),
         "TAVILY_API_KEY": os.getenv("TAVILY_API_KEY"),
         "JINA_API_KEY": os.getenv("JINA_API_KEY"),
-        "FIRECRAWL_API_KEY": os.getenv("FIRECRAWL_API_KEY"),
+        "FIRECRAWL_API_KEY": _resolve_firecrawl_key(),
         "HTTPS_PROXY": os.getenv("HTTPS_PROXY"),
         "HTTP_PROXY": os.getenv("HTTP_PROXY"),
     }
@@ -71,4 +79,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -66,6 +66,72 @@ def test_builtin_filesystem_tools_roundtrip(tmp_path, is_fast_mode: bool) -> Non
     assert "world" in updated.content
 
 
+def test_build_builtin_tools_creates_memory_file(tmp_path, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    build_builtin_tools(workspace_root=tmp_path)
+
+    memory_path = tmp_path / "Memory.md"
+    assert memory_path.exists()
+    assert "todo.md" in memory_path.read_text(encoding="utf-8")
+
+
+def test_todo_manage_initializes_and_updates_todo(tmp_path, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    registry = build_builtin_tools(workspace_root=tmp_path)
+    init_result = registry.invoke(
+        "todo_manage",
+        {
+            "action": "init",
+            "title": "Demo Research",
+            "goal": "完成结构化研究报告",
+            "tasks": ["建立来源索引", "完成初稿"],
+        },
+    )
+    assert init_result.is_error is False
+
+    add_result = registry.invoke(
+        "todo_manage",
+        {
+            "action": "add",
+            "item_text": "补证关键结论",
+            "position": "after",
+            "after_text": "建立来源索引",
+        },
+    )
+    assert add_result.is_error is False
+
+    closure_result = registry.invoke(
+        "todo_manage",
+        {
+            "action": "append_closure",
+            "target_text": "建立来源索引",
+            "conclusion": "来源索引已建立",
+            "evidence": "research/source_index.md",
+            "open_items": "部分来源待深读",
+        },
+    )
+    assert closure_result.is_error is False
+
+    close_result = registry.invoke(
+        "todo_manage",
+        {
+            "action": "set_status",
+            "target_text": "建立来源索引",
+            "status": "closed",
+        },
+    )
+    assert close_result.is_error is False
+
+    todo_text = (tmp_path / "todo.md").read_text(encoding="utf-8")
+    assert "补证关键结论" in todo_text
+    assert "- [x] closed: 建立来源索引" in todo_text
+    assert "依据：research/source_index.md" in todo_text
+
+
 class _FakeResponse:
     def __init__(self, data: dict | None = None, text: str | None = None, status_code: int = 200) -> None:
         self._data = data
@@ -196,6 +262,38 @@ def test_jina_reader_falls_back_to_firecrawl_when_jina_fails(tmp_path, monkeypat
     assert payload["fallback_reason"].startswith("RuntimeError:")
 
 
+def test_jina_reader_fallback_accepts_legacy_firecrawl_env_key(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    monkeypatch.setenv("JINA_API_KEY", "dummy-jina")
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    monkeypatch.setenv("firecraw_api_key", "legacy-firecrawl-key")
+
+    class _LegacyFallbackHttpClient:
+        def post(self, url: str, json: dict | None = None, headers: dict | None = None):  # type: ignore[no-untyped-def]
+            if url == "https://r.jina.ai/":
+                raise RuntimeError("jina ssl failed")
+            if url == "https://api.firecrawl.dev/v2/scrape":
+                assert headers is not None
+                assert headers["Authorization"] == "Bearer legacy-firecrawl-key"
+                return _FakeResponse(
+                    data={
+                        "success": True,
+                        "data": {"markdown": "legacy fallback content", "metadata": {"title": "t"}},
+                    }
+                )
+            raise AssertionError(f"Unexpected URL {url}")
+
+    registry = build_builtin_tools(workspace_root=tmp_path, http_client=_LegacyFallbackHttpClient())
+    result = registry.invoke("jina_reader", {"url": "https://example.com"})
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["provider"] == "firecrawl_fallback"
+    assert "legacy fallback content" in payload["content"]
+
+
 def test_web_search_uses_raw_query_without_runtime_rewrite(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
     if is_fast_mode:
         pass
@@ -236,6 +334,79 @@ def test_web_search_uses_raw_query_without_runtime_rewrite(tmp_path, monkeypatch
     assert payload["query"] == query
     assert "original_query" not in payload
     assert "query_strategy" not in payload
+
+
+def test_web_search_can_keep_selected_results_in_source_index(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    monkeypatch.setenv("TAVILY_API_KEY", "dummy-token")
+
+    class _SearchKeepClient:
+        def post(self, url: str, json: dict | None = None, headers: dict | None = None):  # type: ignore[no-untyped-def]
+            assert url == "https://api.tavily.com/search"
+            return _FakeResponse(
+                data={
+                    "query": (json or {}).get("query"),
+                    "answer": None,
+                    "results": [
+                        {"title": "Source A", "url": "https://a.example.com", "content": "summary A", "score": 0.9},
+                        {"title": "Source B", "url": "https://b.example.com", "content": "summary B", "score": 0.7},
+                    ],
+                }
+            )
+
+    registry = build_builtin_tools(workspace_root=tmp_path, http_client=_SearchKeepClient())
+    result = registry.invoke(
+        "web_search",
+        {
+            "query": "deep research source index",
+            "keep_result_indices": [2],
+            "keep_reason": "用于后续深入阅读",
+        },
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["kept_sources"][0]["title"] == "Source B"
+    index_text = (tmp_path / "research" / "source_index.md").read_text(encoding="utf-8")
+    assert "Source B" in index_text
+    assert "https://b.example.com" in index_text
+    assert "用于后续深入阅读" in index_text
+
+
+def test_jina_reader_archives_raw_source_and_updates_source_index(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    monkeypatch.setenv("JINA_API_KEY", "dummy-jina")
+
+    class _ArchiveJinaClient:
+        def post(self, url: str, json: dict | None = None, headers: dict | None = None):  # type: ignore[no-untyped-def]
+            assert url == "https://r.jina.ai/"
+            return _FakeResponse(
+                data={
+                    "data": {
+                        "title": "Example Source Title",
+                        "content": "# Example Source Title\n\nFull body",
+                        "links": [],
+                        "images": [],
+                    }
+                }
+            )
+
+    registry = build_builtin_tools(workspace_root=tmp_path, http_client=_ArchiveJinaClient())
+    result = registry.invoke("jina_reader", {"url": "https://example.com/page"})
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["raw_path"].startswith("research/raw/Example Source Title")
+    raw_text = (tmp_path / payload["raw_path"]).read_text(encoding="utf-8")
+    assert "url: https://example.com/page" in raw_text
+    assert "Full body" in raw_text
+    index_text = (tmp_path / "research" / "source_index.md").read_text(encoding="utf-8")
+    assert "Example Source Title" in index_text
+    assert payload["raw_path"] in index_text
 
 
 class _FakeArxivPaper:
@@ -343,6 +514,33 @@ def test_arxiv_search_returns_metadata_list(tmp_path, monkeypatch, is_fast_mode:
     payload = json.loads(result.content)
     assert payload["query"] == "transformer attention"
     assert payload["results"][0]["paper_id"] == "1706.03762"
+
+
+def test_arxiv_search_can_keep_selected_results_into_source_index(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    fake_paper = _FakeArxivPaper("1706.03762", title="Attention Is All You Need")
+    fake_arxiv = _FakeArxivModule(fake_paper)
+    monkeypatch.setattr("deep_research_agent.tools._import_arxiv", lambda: fake_arxiv)
+
+    registry = build_builtin_tools(workspace_root=tmp_path)
+    result = registry.invoke(
+        "arxiv_search",
+        {
+            "query": "transformer attention",
+            "max_results": 3,
+            "keep_result_indices": [1],
+            "keep_reason": "原始论文，后续需要深读",
+        },
+    )
+
+    assert result.is_error is False
+    payload = json.loads(result.content)
+    assert payload["kept_sources"][0]["title"] == "Attention Is All You Need"
+    index_text = (tmp_path / "research" / "source_index.md").read_text(encoding="utf-8")
+    assert "Attention Is All You Need" in index_text
+    assert "why_keep: 原始论文，后续需要深读" in index_text
 
 
 def test_pdf_read_url_falls_back_to_local_parser(tmp_path, monkeypatch, is_fast_mode: bool) -> None:

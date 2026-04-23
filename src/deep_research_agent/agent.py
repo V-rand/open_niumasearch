@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,7 +80,11 @@ class ReActAgent:
         )
 
         for turn_index in range(1, self.config.max_turns + 1):
-            context_pack = self.context_manager.build_context_pack(user_input=user_input)
+            context_pack = self.context_manager.build_context_pack(
+                user_input=user_input,
+                turn_index=turn_index,
+                max_turns=self.config.max_turns,
+            )
             self.logger.log_event(
                 event_type="context_pack_built",
                 payload={
@@ -105,20 +110,25 @@ class ReActAgent:
             if conversation_tail:
                 messages.extend(conversation_tail)
 
+            effective_tool_choice: str | dict[str, Any] = self.config.tool_choice
+
             self.logger.log_event(
                 event_type="model_request",
                 payload={
                     "turn_index": turn_index,
                     "system_prompt_path": system_prompt_path,
                     "skill_paths": normalized_skill_paths,
-                    "messages": messages,
-                    "tools": self.tool_registry.to_openai_tools(),
+                    "context_prompt": context_pack.rendered_prompt,
+                    "conversation_tail": _summarize_conversation_tail_for_log(conversation_tail),
+                    "tool_names": self.tool_registry.tool_names(),
+                    "effective_tool_choice": effective_tool_choice,
                 },
             )
+
             response = self.model_backend.complete(
                 messages,
                 tools=self.tool_registry.to_openai_tools(),
-                tool_choice=self.config.tool_choice,
+                tool_choice=effective_tool_choice,
                 enable_thinking=self.config.enable_thinking,
                 parallel_tool_calls=self.config.parallel_tool_calls,
             )
@@ -137,6 +147,7 @@ class ReActAgent:
             if response.tool_calls:
                 tool_results = self._dispatch_tool_calls(response.tool_calls)
                 current_turn_tail: list[dict[str, Any]] = [assistant_message]
+                updated_todo = False
                 for result in tool_results:
                     self.logger.log_event(
                         event_type="tool_result",
@@ -154,6 +165,7 @@ class ReActAgent:
                         result.content,
                         is_error=result.is_error,
                     )
+                    updated_todo = updated_todo or _tool_result_updates_todo(result)
                     current_turn_tail.append(
                         {
                             "role": "tool",
@@ -161,6 +173,10 @@ class ReActAgent:
                             "content": result.content,
                         }
                     )
+                self.context_manager.record_turn_progress(
+                    used_tools=True,
+                    updated_todo=updated_todo,
+                )
                 conversation_tail = _compact_conversation_tail(conversation_tail + current_turn_tail)
                 continue
 
@@ -226,6 +242,18 @@ def _assistant_message_from_response(response: AssistantResponse) -> dict[str, A
     return message
 
 
+def _tool_result_updates_todo(result: ToolExecutionResult) -> bool:
+    if result.name == "todo_manage" and not result.is_error:
+        return True
+    if result.name not in {"fs_write", "fs_patch"} or result.is_error:
+        return False
+    try:
+        payload = json.loads(result.content)
+    except json.JSONDecodeError:
+        return False
+    return payload.get("path") == "todo.md"
+
+
 def _dump_json(value: dict[str, Any]) -> str:
     import json
 
@@ -233,19 +261,57 @@ def _dump_json(value: dict[str, Any]) -> str:
 
 
 def _compact_conversation_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(messages) <= 4:
+    if len(messages) <= 8:
         return messages
-    # Preserve the latest assistant step and its tool observations for API validity.
-    last_assistant_index = -1
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].get("role") == "assistant":
-            last_assistant_index = index
-            break
+    assistant_indices = [index for index, message in enumerate(messages) if message.get("role") == "assistant"]
+    if not assistant_indices:
+        return messages[-8:]
 
-    if last_assistant_index < 0:
-        return messages[-4:]
-
-    tail = messages[last_assistant_index:]
-    if len(tail) <= 4:
+    keep_from = assistant_indices[max(len(assistant_indices) - 4, 0)]
+    tail = messages[keep_from:]
+    if len(tail) <= 8:
         return tail
-    return tail[-4:]
+    return tail[-8:]
+
+
+def _summarize_conversation_tail_for_log(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role", "unknown"))
+        item: dict[str, Any] = {"role": role}
+        if role == "assistant":
+            content = str(message.get("content") or "")
+            if content:
+                item["content_preview"] = _truncate_text(content, 240)
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                item["tool_calls"] = [
+                    _tool_name_from_openai_message_call(tc)
+                    for tc in tool_calls
+                    if isinstance(tc, dict)
+                ]
+        elif role == "tool":
+            item["tool_call_id"] = message.get("tool_call_id")
+            content = str(message.get("content") or "")
+            if content:
+                item["content_preview"] = _truncate_text(content, 240)
+        else:
+            content = str(message.get("content") or "")
+            if content:
+                item["content_preview"] = _truncate_text(content, 240)
+        summary.append(item)
+    return summary
+
+
+def _tool_name_from_openai_message_call(tool_call: dict[str, Any]) -> str:
+    function = tool_call.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "unknown")
+    return str(tool_call.get("name") or "unknown")
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    compact = " ".join(text.strip().split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."

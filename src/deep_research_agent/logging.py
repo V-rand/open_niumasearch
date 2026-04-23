@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -77,11 +78,17 @@ class RunLogger:
         event_type: str,
     ) -> list[dict[str, Any]]:
         artifacts: list[dict[str, Any]] = []
+        skipped_field_paths = self._collect_event_specific_artifacts(
+            payload=payload,
+            event_type=event_type,
+            artifacts=artifacts,
+        )
         self._walk_for_artifacts(
             value=payload,
             event_type=event_type,
             field_path="payload",
             artifacts=artifacts,
+            skipped_field_paths=skipped_field_paths,
         )
         return artifacts
 
@@ -91,7 +98,10 @@ class RunLogger:
         event_type: str,
         field_path: str,
         artifacts: list[dict[str, Any]],
+        skipped_field_paths: set[str],
     ) -> None:
+        if field_path in skipped_field_paths:
+            return
         if isinstance(value, dict):
             for key, item in value.items():
                 self._walk_for_artifacts(
@@ -99,6 +109,7 @@ class RunLogger:
                     event_type=event_type,
                     field_path=f"{field_path}.{key}",
                     artifacts=artifacts,
+                    skipped_field_paths=skipped_field_paths,
                 )
             return
 
@@ -109,12 +120,12 @@ class RunLogger:
                     event_type=event_type,
                     field_path=f"{field_path}[{index}]",
                     artifacts=artifacts,
+                    skipped_field_paths=skipped_field_paths,
                 )
             return
 
         if isinstance(value, str) and len(value) > self.artifact_char_threshold:
-            self._artifact_counter += 1
-            artifact_name = f"artifacts/{self._artifact_counter:04d}_{event_type}.txt"
+            artifact_name = self._next_artifact_name(event_type=event_type, field_path=field_path)
             self.write_text_artifact(artifact_name, value)
             artifacts.append(
                 {
@@ -123,6 +134,35 @@ class RunLogger:
                     "char_count": len(value),
                 }
             )
+
+    def _collect_event_specific_artifacts(
+        self,
+        payload: Any,
+        event_type: str,
+        artifacts: list[dict[str, Any]],
+    ) -> set[str]:
+        skipped_field_paths: set[str] = set()
+        if event_type != "model_request" or not isinstance(payload, dict):
+            return skipped_field_paths
+
+        context_prompt = payload.get("context_prompt")
+        if not isinstance(context_prompt, str) or not context_prompt:
+            return skipped_field_paths
+
+        skipped_field_paths.add("payload.context_prompt")
+        artifact_name = self._next_artifact_name(
+            event_type=event_type,
+            field_path="payload.context_prompt",
+        )
+        self.write_text_artifact(artifact_name, context_prompt)
+        artifacts.append(
+            {
+                "field_path": "payload.context_prompt",
+                "artifact_path": artifact_name,
+                "char_count": len(context_prompt),
+            }
+        )
+        return skipped_field_paths
 
     # ------------------------------------------------------------------
     # Trace formatting — human-readable diary style
@@ -155,9 +195,7 @@ class RunLogger:
             lines.append(f"\n## Turn {turn_index} — {summary}\n")
 
         if event_type == "model_request":
-            # model_request is mostly redundant with model_response + tool_result;
-            # skip it in trace to reduce noise, but keep in events.jsonl.
-            pass
+            lines.extend(self._trace_model_request(payload))
         elif event_type == "model_response":
             lines.extend(self._trace_model_response(payload))
         elif event_type == "tool_result":
@@ -260,6 +298,27 @@ class RunLogger:
                 args = function.get("arguments") if isinstance(function, dict) else tc.get("arguments")
                 args_str = self._inline_args(args)
                 lines.append(f"🛠️ **Tool**: `{name}` — {args_str}\n")
+
+        return lines
+
+    def _trace_model_request(self, payload: dict[str, Any]) -> list[str]:
+        lines: list[str] = []
+        context_prompt = payload.get("context_prompt")
+        if context_prompt:
+            lines.append("🧾 **Context Input**")
+            lines.append(self._compact_preview(str(context_prompt), max_lines=18))
+            lines.append("")
+
+        conversation_tail = payload.get("conversation_tail")
+        if isinstance(conversation_tail, list) and conversation_tail:
+            lines.append("**Conversation Tail**")
+            lines.append(self._compact_preview(self._render_value(conversation_tail), max_lines=8))
+            lines.append("")
+
+        effective_tool_choice = payload.get("effective_tool_choice")
+        if effective_tool_choice is not None:
+            lines.append(f"**Tool Choice**: `{effective_tool_choice}`")
+            lines.append("")
 
         return lines
 
@@ -375,3 +434,11 @@ class RunLogger:
 
     def _indent_block(self, lines: list[str]) -> list[str]:
         return [f"  {line}" if line else "" for line in lines]
+
+    def _slugify_field_path(self, field_path: str) -> str:
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", field_path).strip("_").lower()
+        return slug or "payload"
+
+    def _next_artifact_name(self, *, event_type: str, field_path: str) -> str:
+        self._artifact_counter += 1
+        return f"artifacts/{self._artifact_counter:04d}_{event_type}_{self._slugify_field_path(field_path)}.txt"

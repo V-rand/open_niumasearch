@@ -1,5 +1,326 @@
 # CHANGELOG
 
+## 2026-04-23 (by Codex) — Memory 入口 + TODO 专用工具 + 搜索采纳来源
+
+### 本轮目标
+
+- 把 `todo.md` 从“建议用文件改”推进成明确的专用工具能力
+- 给 agent 一个稳定的工作区入口 `Memory.md`
+- 收缩默认上下文，不再每轮展开所有目录清单
+- 把 `source_index` 的主入口从“深读后归档”纠正为“搜索后采纳”
+
+### 运行时与上下文
+
+- `src/deep_research_agent/tools.py`
+  - 初始化内置工具时自动创建 `Memory.md`
+  - `Memory.md` 只记录工作区入口和工作约定，不承载正文内容
+- `src/deep_research_agent/context_manager.py`
+  - 默认上下文改为：
+    - 当前任务
+    - `Memory.md`
+    - TODO 提醒
+    - 最近工具观察
+  - 不再默认把 `source_index`、`raw/notes/evidence/drafts` 文件清单整段展开给模型
+  - 新增 TODO 陈旧提醒：如果连续多轮只搜/只读而未更新 `todo.md`，下一轮上下文会明确提示优先回看并推进 TODO
+
+### TODO 专用工具
+
+- 新增 `todo_manage`
+  - `init`
+  - `add`
+  - `edit`
+  - `set_status`
+  - `delete`
+  - `append_closure`
+- `todo_manage` 会继续复用原有 closure 校验：
+  - `closed` 项必须带 `结论 / 依据 / 未决项`
+- 保留 `fs_write` / `fs_patch` 对 `todo.md` 的兼容路径，方便回退
+
+### 来源采纳职责调整
+
+- `web_search` 仍可通过 `keep_result_indices` 把结果写入 `research/source_index.md`
+- `arxiv_search` 新增同样的 `keep_result_indices` / `keep_reason`
+- `_keep_selected_search_results()` 现在兼容：
+  - `url`
+  - `entry_id`
+  - `source_url`
+  - `pdf_url`
+  - 以及 `content` 或 `summary`
+- 这样 `source_index` 的主入口回到 search 工具；`read` 工具继续负责补 `raw_path`
+
+### Agent 行为调整
+
+- `src/deep_research_agent/agent.py`
+  - 不再在最后一轮强制 `tool_choice="none"`
+  - 新增本轮是否更新了 `todo.md` 的检测，并反馈给 `ContextManager`
+
+### Prompt / Skill
+
+- `prompts/system.md`
+  - 明确要求先读 `Memory.md`
+  - 强调多用文件工具、少靠聊天记忆
+  - 强调有实质推进就更新 `todo.md`
+- `skills/todo.md`
+  - 补充 `todo_manage` 的优先使用约定
+  - 强化“只要有推进就更新 TODO”的要求
+
+### 测试
+
+- `tests/test_tools.py`
+  - 新增 `Memory.md` 自动创建测试
+  - 新增 `todo_manage` 初始化 / 增删改闭环测试
+  - 新增 `arxiv_search` 采纳结果进入 `source_index` 测试
+- `tests/test_context_manager.py`
+  - 改为验证 `Memory.md` 驱动的轻上下文
+  - 新增 TODO 陈旧提醒测试
+- `tests/test_agent_loop.py`
+  - 更新为验证 `tool_choice` 不再在末轮被 runtime 强制改成 `none`
+
+### 验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_tools.py tests/test_context_manager.py tests/test_agent_loop.py tests/test_skills.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
+## 2026-04-23 (by Codex) — 来源工具最小闭环（保留来源 + 自动归档）
+
+### 目标收敛
+
+- 不再讨论泛化的“search index”
+- 先实现最小可用的来源工具闭环：
+  - 搜索结果可按序号收录到 `research/source_index.md`
+  - 阅读类工具自动把正文归档到 `research/raw/`
+  - 深读后同步更新 `research/source_index.md`
+
+### 工具行为调整
+
+- `web_search`
+  - 新增可选参数：
+    - `keep_result_indices`
+    - `keep_reason`
+  - 模型可以在搜索结果返回后，用序号选择哪些来源值得保留
+  - 被保留来源自动写入 `research/source_index.md`
+- `jina_reader`
+  - 成功读取后自动：
+    - 写入 `research/raw/<title>.md`
+    - 更新 `research/source_index.md`
+  - 返回新增字段：
+    - `source_id`
+    - `raw_path`
+    - `source_index_updated`
+  - Firecrawl fallback 现在也走同样归档路径
+- `arxiv_read_paper`
+  - 保持原有 `documents/` 输出兼容
+  - 同时新增 raw source 归档和 source index 更新
+- `pdf_read_url`
+  - 本地解析和 MinerU 成功结果都会同步归档 raw source 并更新 source index
+
+### Source Index 结构
+
+- 当前采用极简结构，每个来源条目只保留：
+  - `title`
+  - `url`
+  - `summary`
+  - `judgment`
+  - `raw_path`
+  - `note_paths`
+  - `why_keep`（仅搜索保留时写入）
+- 不记录“被谁发现”“evidence 引用”等当前阶段不必要字段
+- 目的仅是：
+  - 避免重复劳动
+  - 提高后续回读和复用速度
+
+### 简单算法而非额外 LLM
+
+- raw source 文件名优先使用原文标题，做轻量文件名清洗和冲突编号
+- `source_index.md` 采用固定 Markdown 块结构，并用简单解析/重写逻辑维护
+- `summary` 使用正文或搜索摘要的简单截断，不额外调用模型
+- `judgment` 用 host 规则给初值（如 `nature/arxiv/.gov/.edu` -> `high`）
+
+### 测试与验证
+
+- 新增 `tests/test_tools.py`
+  - 验证 `web_search` 可按序号收录来源
+  - 验证 `jina_reader` 会自动归档 raw source 并更新 source index
+- 验证结果：
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_tools.py -q --fast`：通过
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_logging.py tests/test_context_manager.py -q --fast`：通过
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
+## 2026-04-23 (by Codex) — 单一 TODO 体系替代双 TODO
+
+### 设计调整
+
+- 废弃 `research-todo` / `write-todo` 双技能与双 TODO 控制面板
+- 改为单一 `skills/todo.md` 和统一的 `todo.md`
+- 原因：
+  - 双 TODO 会把本来连续的认知过程硬拆成两个状态机
+  - 模型容易卡在“继续研究但不写作”或“进入写作后不敢补证”
+  - 不符合 deep research 中“调查 -> 认识 -> 写作 -> 发现缺口 -> 补证 -> 修订”的循环过程
+
+### 新的系统主线
+
+- `prompts/system.md` 重写为“双阶段但可往返”的工作方式：
+  - 先广泛调查与核实，形成从感性到理性的认识
+  - 再进入写作实践，把认识组织成结构化表达
+  - 写作中如发现证据不足、来源冲突、判断过强，可自主回到检索和验证
+- 将以下思想原则显式写入 system prompt：
+  - 没有调查就没有发言权
+  - 实践—认识—再实践
+  - 主要矛盾优先
+  - 具体问题具体分析
+
+### 新的统一 TODO skill
+
+- 新增 `skills/todo.md`
+- 合并原 research / writing 两套原则，强调：
+  - TODO 是贯穿全流程的唯一控制面板
+  - 不人为拆研究和写作
+  - 写作中可主动补证和修订
+  - 条目要围绕判断、证据和表达，而不是围绕“再搜什么”
+- 删除：
+  - `skills/research-todo.md`
+  - `skills/write-todo.md`
+
+### 代码与上下文同步调整
+
+- `src/deep_research_agent/context_manager.py`
+  - 只读取统一 `todo.md`
+  - 不再读取 `research/todo.md` / `writing/todo.md`
+- `src/deep_research_agent/tools.py`
+  - TODO closure guard 现在对 `todo.md` 生效
+  - 同时暂时兼容旧路径 `research/todo.md` / `writing/todo.md`
+- `README.md`
+  - eval 示例 skill 改为 `--skill todo`
+
+### 测试更新
+
+- 更新 `tests/test_skills.py`
+  - 改为验证统一 `todo` skill
+- 更新 `tests/test_session.py`
+  - eval skill 从 `research-todo` 改为 `todo`
+- 更新 `tests/test_context_manager.py`
+  - 改为验证统一 `todo.md` 进入上下文
+
+### 验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_skills.py tests/test_session.py tests/test_context_manager.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
+## 2026-04-23 (by Codex) — 上下文策略回退到弱约束全量模式
+
+### 回退原因
+
+- 基于长问题真实日志复盘，当前 attention-style context pack 约束过强：
+  - 强行注入 `phase` / `subgoal` / `budget` / `convergence_hint`
+  - 容易把 agent 锁在“研究控制台”视角，而不是允许其自行切换到整理或写作
+- 按当前阶段需求，先回退到更自由的上下文管理策略，不提前解决 200k 窗口问题
+
+### ContextManager 调整
+
+- `src/deep_research_agent/context_manager.py` 改为更接近“全量上下文 + 文件系统导向”的结构：
+  - 保留完整 `当前任务`
+  - 注入完整 `research/todo.md`
+  - 注入完整 `writing/todo.md`
+  - 注入 `research/source_index.md`
+  - 注入 `research/raw/`、`research/notes/`、`research/evidence/`、`writing/drafts/` 的文件索引
+- 不再主动给模型注入：
+  - `当前阶段`
+  - `当前 Subgoal`
+  - `回合预算`
+  - `收敛策略`
+- 最近工具观察从 6 条缩到 4 条，更贴近“近 4 轮工具调用结果”
+- 工具观察优先提取路径/URL：
+  - 如 `markdown_path`、`pdf_path`、`source_url`、`url`
+  - 避免把长 `markdown_preview` 再次塞回上下文
+
+### 对话尾巴策略调整
+
+- `src/deep_research_agent/agent.py`
+  - `conversation_tail` 不再只保留最新一个 assistant/tool 组合
+  - 现在保留最近 4 个 assistant/tool 回合（最多 8 条消息）
+- 目标是恢复“近几轮真实工作痕迹”而不是过早压缩成长摘要
+
+### System Prompt 收缩
+
+- `prompts/system.md` 去掉强阶段化和收敛化措辞：
+  - 删除强调 `subgoal` / `阶段判断` / `收敛控制` 的内容
+  - 改成允许 agent 自行判断研究、整理和写作的切换
+- 文件规范中显式补充：
+  - `writing/todo.md`
+  - `research/source_index.md`
+  - `writing/drafts/<section>.md`
+
+### 测试更新
+
+- 更新 `tests/test_context_manager.py`
+  - 改为验证完整 TODO、文件索引和路径导向的工具观察摘要
+- 更新 `tests/test_agent_loop.py`
+  - 新增最近 4 个 assistant/tool 回合保留测试
+
+### 验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_context_manager.py tests/test_agent_loop.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_logging.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_tools.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
+## 2026-04-23 (by Codex) — 日志可用性修复（model_request / trace）
+
+### 修复日志主问题
+
+- 修复 `model_request` 记录过度冗余的问题：
+  - `ReActAgent` 不再把整段原始 `messages` 和完整工具 schema 直接写入 `model_request` 日志
+  - 改为记录：
+    - `context_prompt`（本轮真正给 agent 的上下文包）
+    - `conversation_tail` 的摘要
+    - `tool_names`
+    - `effective_tool_choice`
+- 这样避免了每轮 artifact 大量重复落盘 system prompt、tool result 原文和完整工具定义，降低日志噪音
+
+### 修复 trace 缺少“每轮真实输入”的问题
+
+- `trace.md` 不再完全忽略 `model_request`
+- 新增每轮输入可视化：
+  - `🧾 Context Input`：显示本轮实际发送给 agent 的 `context_prompt`
+  - `Conversation Tail`：显示上一轮 assistant/tool 回填的摘要，而不是完整原文
+  - `Tool Choice`：显示该轮的 `effective_tool_choice`
+- 保持 system prompt 不重复展开，避免 trace 被固定提示词刷屏
+
+### 修复 artifact 命名混乱的问题
+
+- artifact 文件名从：
+  - `0001_model_request.txt`
+  - `0002_tool_result.txt`
+  改为带字段路径的形式，例如：
+  - `0001_model_request_payload_context_prompt.txt`
+  - `0002_tool_result_payload_content.txt`
+- 这样可直接区分 artifact 来自哪个事件、哪个字段，减少“model_request 和 tool_result 混在一起看不出来”的问题
+- `model_request` 的 `context_prompt` 现在每轮固定落盘为 artifact，不再依赖长度超过阈值才保存
+- 这样每一轮真实发送给 agent 的动态输入都会被稳定记录，避免只留下固定 system 部分或字符统计
+
+### 失败模式留痕
+
+- 原失败现象：
+  - `model_request` artifact 大量是 system prompt 内容，难以定位本轮实际上下文输入
+  - `trace.md` 只显示 `context_pack_built` 的字符统计，不显示实际传给模型的动态上下文
+  - `tool_result` 的长文本会在 `model_request` 原始 `messages` 中再次出现，形成重复记录
+- 当前修复策略：
+  - 在日志层做结构化摘要
+  - 在 trace 层显示动态输入
+  - 不再把固定系统部分和重复工具结果作为每轮主日志内容
+
+### 测试新增与验证
+
+- 更新 `tests/test_logging.py`：
+  - 验证 trace 显示 `Context Input`
+  - 验证 system prompt 不在 `model_request` trace 中重复出现
+  - 验证 artifact 文件名包含字段路径
+- 新增 `ToolRegistry.tool_names()` 供日志摘要使用
+- 验证结果：
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_logging.py -q --fast`：通过
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_agent_loop.py tests/test_context_manager.py -q --fast`：通过
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
 ## 2026-04-22 (by Codex) — 上下文注意力管理改造（M1）
 
 ### 新增活跃对象上下文管理

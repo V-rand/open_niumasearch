@@ -46,6 +46,9 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
+    def tool_names(self) -> list[str]:
+        return list(self._tools.keys())
+
     def invoke(self, name: str, arguments: dict[str, Any], call_id: str | None = None) -> ToolExecutionResult:
         tool = self._tools.get(name)
         if tool is None:
@@ -113,6 +116,7 @@ def build_builtin_tools(
     registry = ToolRegistry()
     workspace_root = Path(workspace_root).resolve()
     http_client = http_client or httpx.Client(timeout=60.0, trust_env=True)
+    _ensure_memory_file(workspace_root)
 
     def resolve_path(raw_path: str) -> Path:
         path = (workspace_root / raw_path).resolve()
@@ -193,7 +197,7 @@ def build_builtin_tools(
             next_text = content
 
         relative_path = str(path.relative_to(workspace_root))
-        if relative_path in {"research/todo.md", "writing/todo.md"}:
+        if relative_path in {"todo.md", "research/todo.md", "writing/todo.md"}:
             closure_errors = _validate_todo_closure_attempts(next_text)
             if closure_errors:
                 raise ValueError(
@@ -249,6 +253,65 @@ def build_builtin_tools(
             "replaced_count": replaced_count,
         }
 
+    def todo_manage(arguments: dict[str, Any]) -> dict[str, Any]:
+        todo_path = resolve_path("todo.md")
+        action = arguments["action"]
+
+        if action == "init":
+            title = arguments["title"].strip()
+            goal = arguments["goal"].strip()
+            tasks = [str(item).strip() for item in arguments.get("tasks", []) if str(item).strip()]
+            overwrite = bool(arguments.get("overwrite", False))
+            if todo_path.exists() and not overwrite:
+                raise FileExistsError("todo.md already exists; set overwrite=true to replace it")
+            text = _render_todo_template(title=title, goal=goal, tasks=tasks)
+            closure_errors = _validate_todo_closure_attempts(text)
+            if closure_errors:
+                raise ValueError("TODO closure attempt validation failed: " + "; ".join(closure_errors))
+            todo_path.write_text(text, encoding="utf-8")
+            return {"path": "todo.md", "action": action, "task_count": len(tasks)}
+
+        if not todo_path.exists():
+            raise FileNotFoundError("todo.md does not exist; use action=init first")
+
+        text = todo_path.read_text(encoding="utf-8")
+        updated = text
+        if action == "add":
+            item_text = arguments["item_text"].strip()
+            position = arguments.get("position", "end")
+            after_text = str(arguments.get("after_text", "")).strip()
+            updated = _todo_add_item(text, item_text=item_text, position=position, after_text=after_text)
+        elif action == "edit":
+            updated = _todo_edit_item(
+                text,
+                target_text=arguments["target_text"].strip(),
+                new_text=arguments["new_text"].strip(),
+            )
+        elif action == "set_status":
+            updated = _todo_set_status(
+                text,
+                target_text=arguments["target_text"].strip(),
+                status=arguments["status"].strip(),
+            )
+        elif action == "delete":
+            updated = _todo_delete_item(text, target_text=arguments["target_text"].strip())
+        elif action == "append_closure":
+            updated = _todo_append_closure(
+                text,
+                target_text=arguments["target_text"].strip(),
+                conclusion=arguments["conclusion"].strip(),
+                evidence=arguments["evidence"].strip(),
+                open_items=str(arguments.get("open_items", "")).strip(),
+            )
+        else:
+            raise ValueError(f"Unsupported todo action: {action}")
+
+        closure_errors = _validate_todo_closure_attempts(updated)
+        if closure_errors:
+            raise ValueError("TODO closure attempt validation failed: " + "; ".join(closure_errors))
+        todo_path.write_text(updated, encoding="utf-8")
+        return {"path": "todo.md", "action": action}
+
     def web_search(arguments: dict[str, Any]) -> dict[str, Any]:
         api_key = os.getenv("TAVILY_API_KEY")
         if not api_key:
@@ -279,18 +342,27 @@ def build_builtin_tools(
         response.raise_for_status()
         data = response.json()
 
+        results = [
+            {
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "content": item.get("content"),
+                "score": item.get("score"),
+            }
+            for item in data.get("results", [])
+        ]
+        kept_sources = _keep_selected_search_results(
+            workspace_root=workspace_root,
+            results=results,
+            selected_indices=arguments.get("keep_result_indices"),
+            keep_reason=arguments.get("keep_reason"),
+        )
+
         return {
             "query": data.get("query", arguments["query"]),
             "answer": data.get("answer"),
-            "results": [
-                {
-                    "title": item.get("title"),
-                    "url": item.get("url"),
-                    "content": item.get("content"),
-                    "score": item.get("score"),
-                }
-                for item in data.get("results", [])
-            ],
+            "results": results,
+            "kept_sources": kept_sources,
         }
 
     def jina_reader(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -324,6 +396,14 @@ def build_builtin_tools(
             response = http_client.post("https://r.jina.ai/", headers=headers, json=body)
             response.raise_for_status()
             data = response.json().get("data", {})
+            archived = _archive_source_content(
+                workspace_root=workspace_root,
+                title=data.get("title") or arguments["url"],
+                url=arguments["url"],
+                content=data.get("content", ""),
+                source_type="web",
+                summary_hint=data.get("content", ""),
+            )
             return {
                 "title": data.get("title"),
                 "url": arguments["url"],
@@ -331,12 +411,14 @@ def build_builtin_tools(
                 "links": data.get("links", []),
                 "images": data.get("images", []),
                 "provider": "jina",
+                **archived,
             }
         except Exception as jina_exc:
-            firecrawl_key = os.getenv("FIRECRAWL_API_KEY")
+            firecrawl_key = _resolve_firecrawl_api_key()
             if not firecrawl_key:
                 raise jina_exc
             return _firecrawl_scrape_fallback(
+                workspace_root=workspace_root,
                 url=arguments["url"],
                 firecrawl_api_key=firecrawl_key,
                 http_client=http_client,
@@ -363,9 +445,16 @@ def build_builtin_tools(
         results = []
         for paper in client.results(search):
             results.append(_serialize_arxiv_paper(paper))
+        kept_sources = _keep_selected_search_results(
+            workspace_root=workspace_root,
+            results=results,
+            selected_indices=arguments.get("keep_result_indices"),
+            keep_reason=arguments.get("keep_reason"),
+        )
         return {
             "query": arguments["query"],
             "results": results,
+            "kept_sources": kept_sources,
         }
 
     def arxiv_read_paper(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -391,12 +480,21 @@ def build_builtin_tools(
         markdown = pymupdf4llm.to_markdown(str(pdf_path))
         markdown_path = document_dir / f"{paper_id}.md"
         markdown_path.write_text(markdown, encoding="utf-8")
+        archived = _archive_source_content(
+            workspace_root=workspace_root,
+            title=getattr(paper, "title", None) or paper_id,
+            url=getattr(paper, "entry_id", None) or arguments["paper_ref"],
+            content=markdown,
+            source_type="paper",
+            summary_hint=getattr(paper, "summary", None),
+        )
 
         return {
             **_serialize_arxiv_paper(paper),
             "pdf_path": str(pdf_path.relative_to(workspace_root)),
             "markdown_path": str(markdown_path.relative_to(workspace_root)),
             "markdown_preview": markdown[: int(arguments.get("preview_chars", 4000))],
+            **archived,
         }
 
     def pdf_read_url(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -404,6 +502,7 @@ def build_builtin_tools(
         if strategy == "mineru_only":
             mineru_result = _mineru_parse_url_lightweight(arguments=arguments, http_client=http_client)
             return _normalize_pdf_tool_result_from_mineru(
+                workspace_root=workspace_root,
                 url=arguments["url"],
                 mineru_result=mineru_result,
                 fallback_used=False,
@@ -421,6 +520,7 @@ def build_builtin_tools(
         mineru_result = _mineru_parse_url_lightweight(arguments=arguments, http_client=http_client)
         if mineru_result.get("state") == "done" and mineru_result.get("markdown"):
             return _normalize_pdf_tool_result_from_mineru(
+                workspace_root=workspace_root,
                 url=arguments["url"],
                 mineru_result=mineru_result,
                 fallback_used=False,
@@ -509,8 +609,41 @@ def build_builtin_tools(
     )
     registry.register(
         ToolDefinition(
+            name="todo_manage",
+            description="Create and maintain todo.md as the single task control panel. Use this instead of freehand fs_write when creating, adding, editing, reprioritizing, closing, or deleting TODO items.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["init", "add", "edit", "set_status", "delete", "append_closure"],
+                    },
+                    "title": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "tasks": {"type": "array", "items": {"type": "string"}},
+                    "overwrite": {"type": "boolean"},
+                    "item_text": {"type": "string"},
+                    "position": {"type": "string", "enum": ["top", "end", "after"]},
+                    "after_text": {"type": "string"},
+                    "target_text": {"type": "string"},
+                    "new_text": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["open", "in_progress", "tentatively_resolved", "closed", "deferred", "abandoned"],
+                    },
+                    "conclusion": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "open_items": {"type": "string"},
+                },
+                "required": ["action"],
+            },
+            handler=todo_manage,
+        )
+    )
+    registry.register(
+        ToolDefinition(
             name="web_search",
-            description="Search the web with Tavily. Returns a list of results, each containing title, URL, and a content snippet (summary, not full text). For key claims that need verification or evidence, use jina_reader or pdf_read_url to read the full page content. Start broad, then narrow if needed.",
+            description="Search the web with Tavily. Returns a list of results, each containing title, URL, and a content snippet (summary, not full text). For key claims that need verification or evidence, use jina_reader or pdf_read_url to read the full page content. Start broad, then narrow if needed. If you already know which results are worth keeping, pass keep_result_indices to add them into research/source_index.md.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -526,6 +659,8 @@ def build_builtin_tools(
                     "include_domains": {"type": "array"},
                     "exclude_domains": {"type": "array"},
                     "country": {"type": "string"},
+                    "keep_result_indices": {"type": "array"},
+                    "keep_reason": {"type": "string"},
                 },
                 "required": ["query"],
             },
@@ -535,7 +670,7 @@ def build_builtin_tools(
     registry.register(
         ToolDefinition(
             name="jina_reader",
-            description="Read and extract an HTML web page with Jina Reader. Prefer this for normal web pages, not PDF/doc/ppt/image files. Use proxy-enabled shell when the network blocks jina. If Jina fails and FIRECRAWL_API_KEY is configured, the tool falls back to Firecrawl scrape.",
+            description="Read and extract an HTML web page with Jina Reader. Prefer this for normal web pages, not PDF/doc/ppt/image files. Use proxy-enabled shell when the network blocks jina. If Jina fails and FIRECRAWL_API_KEY is configured, the tool falls back to Firecrawl scrape. Successful reads are archived into research/raw/ and synchronized into research/source_index.md.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -580,7 +715,7 @@ def build_builtin_tools(
     registry.register(
         ToolDefinition(
             name="arxiv_search",
-            description="Search arXiv papers by query using the arXiv API. Use this instead of generic web search when the target is clearly an arXiv paper or topic.",
+            description="Search arXiv papers by query using the arXiv API. Use this instead of generic web search when the target is clearly an arXiv paper or topic. If you already know which results are worth keeping, pass keep_result_indices to add them into research/source_index.md.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -588,6 +723,8 @@ def build_builtin_tools(
                     "max_results": {"type": "integer"},
                     "sort_by": {"type": "string", "enum": ["relevance", "last_updated", "submitted"]},
                     "sort_order": {"type": "string", "enum": ["ascending", "descending"]},
+                    "keep_result_indices": {"type": "array", "items": {"type": "integer"}},
+                    "keep_reason": {"type": "string"},
                 },
                 "required": ["query"],
             },
@@ -597,7 +734,7 @@ def build_builtin_tools(
     registry.register(
         ToolDefinition(
             name="arxiv_read_paper",
-            description="Read an arXiv paper by arXiv id, abs URL, or pdf URL. Downloads the PDF with arxiv.py, parses it with PyMuPDF4LLM, and writes the full Markdown into the current session workspace.",
+            description="Read an arXiv paper by arXiv id, abs URL, or pdf URL. Downloads the PDF with arxiv.py, parses it with PyMuPDF4LLM, writes Markdown into the current session workspace, archives a raw source copy into research/raw/, and updates research/source_index.md.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -612,7 +749,7 @@ def build_builtin_tools(
     registry.register(
         ToolDefinition(
             name="pdf_read_url",
-            description="Read a general PDF URL. Default strategy is local download plus PyMuPDF4LLM. Parsed files are written into the current session workspace. Use MinerU only when explicitly requested.",
+            description="Read a general PDF URL. Default strategy is local download plus PyMuPDF4LLM. Parsed files are written into the current session workspace, archived into research/raw/, and synchronized into research/source_index.md. Use MinerU only when explicitly requested.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -838,10 +975,19 @@ def _serialize_arxiv_paper(paper: Any) -> dict[str, Any]:
 
 def _normalize_pdf_tool_result_from_mineru(
     *,
+    workspace_root: Path,
     url: str,
     mineru_result: dict[str, Any],
     fallback_used: bool,
 ) -> dict[str, Any]:
+    archived = _archive_source_content(
+        workspace_root=workspace_root,
+        title=_title_from_url(url),
+        url=url,
+        content=mineru_result.get("markdown") or "",
+        source_type="pdf",
+        summary_hint=mineru_result.get("markdown") or "",
+    )
     return {
         "source_url": url,
         "method": "mineru",
@@ -849,6 +995,7 @@ def _normalize_pdf_tool_result_from_mineru(
         "state": mineru_result.get("state"),
         "markdown_url": mineru_result.get("markdown_url"),
         "markdown_preview": (mineru_result.get("markdown") or "")[:4000],
+        **archived,
     }
 
 
@@ -869,6 +1016,14 @@ def _read_pdf_locally_from_url(
     markdown = pymupdf4llm.to_markdown(str(pdf_path))
     markdown_path = pdf_path.with_suffix(".md")
     markdown_path.write_text(markdown, encoding="utf-8")
+    archived = _archive_source_content(
+        workspace_root=workspace_root,
+        title=_title_from_url(url),
+        url=url,
+        content=markdown,
+        source_type="pdf",
+        summary_hint=markdown,
+    )
     return {
         "source_url": url,
         "method": "local_pymupdf4llm",
@@ -876,6 +1031,7 @@ def _read_pdf_locally_from_url(
         "pdf_path": str(pdf_path.relative_to(workspace_root)),
         "markdown_path": str(markdown_path.relative_to(workspace_root)),
         "markdown_preview": markdown[:preview_chars],
+        **archived,
     }
 
 
@@ -900,6 +1056,14 @@ def _document_store_dir(workspace_root: Path) -> Path:
     return workspace_root / "documents"
 
 
+def _raw_store_dir(workspace_root: Path) -> Path:
+    return workspace_root / "research" / "raw"
+
+
+def _source_index_path(workspace_root: Path) -> Path:
+    return workspace_root / "research" / "source_index.md"
+
+
 def _suggest_pdf_filename(url: str) -> str:
     parsed = urlparse(url)
     candidate = Path(parsed.path).name or "document.pdf"
@@ -907,6 +1071,247 @@ def _suggest_pdf_filename(url: str) -> str:
         digest = sha1(url.encode("utf-8")).hexdigest()[:12]
         candidate = f"{candidate or 'document'}_{digest}.pdf"
     return candidate
+
+
+def _keep_selected_search_results(
+    *,
+    workspace_root: Path,
+    results: list[dict[str, Any]],
+    selected_indices: Any,
+    keep_reason: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(selected_indices, list) or not selected_indices:
+        return []
+
+    kept_sources: list[dict[str, Any]] = []
+    for raw_index in selected_indices:
+        index = int(raw_index) - 1
+        if index < 0 or index >= len(results):
+            raise ValueError(f"Invalid keep_result_indices entry: {raw_index}")
+        item = results[index]
+        url = item.get("url") or item.get("entry_id") or item.get("source_url") or item.get("pdf_url") or ""
+        title = item.get("title") or _title_from_url(url)
+        summary = _summarize_source_text(item.get("content") or item.get("summary") or "")
+        entry = _build_source_entry(
+            title=title,
+            url=url,
+            summary=summary,
+            judgment=_judgment_for_url(url),
+            raw_path="pending",
+            note_paths=[],
+            why_keep=str(keep_reason or ""),
+        )
+        _upsert_source_index(workspace_root=workspace_root, entry=entry)
+        kept_sources.append(
+            {
+                "index": index + 1,
+                "title": title,
+                "url": url,
+                "summary": summary,
+            }
+        )
+    return kept_sources
+
+
+def _archive_source_content(
+    *,
+    workspace_root: Path,
+    title: str,
+    url: str,
+    content: str,
+    source_type: str,
+    summary_hint: str | None,
+) -> dict[str, Any]:
+    source_title = title.strip() or _title_from_url(url)
+    source_id = _slugify_title(source_title)
+    raw_dir = _raw_store_dir(workspace_root)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = _next_available_raw_path(raw_dir=raw_dir, title=source_title)
+    raw_relative_path = str(raw_path.relative_to(workspace_root))
+    raw_content = _render_raw_source_markdown(
+        title=source_title,
+        url=url,
+        source_type=source_type,
+        content=content,
+    )
+    raw_path.write_text(raw_content, encoding="utf-8")
+
+    entry = _build_source_entry(
+        title=source_title,
+        url=url,
+        summary=_summarize_source_text(summary_hint or content),
+        judgment=_judgment_for_url(url),
+        raw_path=raw_relative_path,
+        note_paths=[],
+        why_keep="",
+    )
+    _upsert_source_index(workspace_root=workspace_root, entry=entry)
+    return {
+        "source_id": source_id,
+        "raw_path": raw_relative_path,
+        "source_index_updated": True,
+    }
+
+
+def _build_source_entry(
+    *,
+    title: str,
+    url: str,
+    summary: str,
+    judgment: str,
+    raw_path: str,
+    note_paths: list[str],
+    why_keep: str,
+) -> dict[str, Any]:
+    return {
+        "source_id": _slugify_title(title),
+        "title": title,
+        "url": url,
+        "summary": summary,
+        "judgment": judgment,
+        "raw_path": raw_path,
+        "note_paths": note_paths,
+        "why_keep": why_keep,
+    }
+
+
+def _upsert_source_index(*, workspace_root: Path, entry: dict[str, Any]) -> None:
+    index_path = _source_index_path(workspace_root)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    entries = _parse_source_index(index_path.read_text(encoding="utf-8")) if index_path.exists() else []
+
+    replaced = False
+    for index, existing in enumerate(entries):
+        if existing.get("url") == entry["url"]:
+            merged = dict(existing)
+            merged.update({k: v for k, v in entry.items() if v not in {"", [], "pending"}})
+            if existing.get("raw_path") and entry.get("raw_path") == "pending":
+                merged["raw_path"] = existing["raw_path"]
+            if existing.get("why_keep") and not entry.get("why_keep"):
+                merged["why_keep"] = existing["why_keep"]
+            if existing.get("note_paths"):
+                merged["note_paths"] = existing["note_paths"]
+            entries[index] = merged
+            replaced = True
+            break
+
+    if not replaced:
+        entries.append(entry)
+
+    index_path.write_text(_render_source_index(entries), encoding="utf-8")
+
+
+def _parse_source_index(text: str) -> list[dict[str, Any]]:
+    if not text.strip():
+        return []
+
+    blocks = re.split(r"^### ", text, flags=re.MULTILINE)
+    entries: list[dict[str, Any]] = []
+    for block in blocks[1:]:
+        lines = block.splitlines()
+        if not lines:
+            continue
+        title = lines[0].strip()
+        entry: dict[str, Any] = {"title": title, "note_paths": []}
+        for raw_line in lines[1:]:
+            line = raw_line.strip()
+            if not line.startswith("- "):
+                continue
+            key, _, value = line[2:].partition(":")
+            normalized_key = key.strip().replace(" ", "_")
+            normalized_value = value.strip()
+            if normalized_key == "note_paths":
+                entry["note_paths"] = [] if normalized_value in {"", "-"} else [item.strip() for item in normalized_value.split(",")]
+            else:
+                entry[normalized_key] = normalized_value
+        entries.append(entry)
+    return entries
+
+
+def _render_source_index(entries: list[dict[str, Any]]) -> str:
+    lines = ["# Source Index", ""]
+    for entry in entries:
+        note_paths = ", ".join(entry.get("note_paths", [])) or "-"
+        lines.extend(
+            [
+                f"### {entry.get('title', 'Untitled Source')}",
+                f"- url: {entry.get('url', '')}",
+                f"- summary: {entry.get('summary', '')}",
+                f"- judgment: {entry.get('judgment', 'medium')}",
+                f"- raw_path: {entry.get('raw_path', 'pending')}",
+                f"- note_paths: {note_paths}",
+            ]
+        )
+        why_keep = entry.get("why_keep", "")
+        if why_keep:
+            lines.append(f"- why_keep: {why_keep}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_raw_source_markdown(*, title: str, url: str, source_type: str, content: str) -> str:
+    return (
+        f"# {title}\n\n"
+        f"- title: {title}\n"
+        f"- url: {url}\n"
+        f"- type: {source_type}\n\n"
+        "## Raw Content\n\n"
+        f"{content.strip()}\n"
+    )
+
+
+def _next_available_raw_path(*, raw_dir: Path, title: str) -> Path:
+    stem = _sanitize_filename(title) or "source"
+    candidate = raw_dir / f"{stem}.md"
+    if not candidate.exists():
+        return candidate
+    suffix = 2
+    while True:
+        candidate = raw_dir / f"{stem}-{suffix}.md"
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
+def _sanitize_filename(value: str) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|]+', " ", value).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:120].rstrip(" .")
+
+
+def _slugify_title(title: str) -> str:
+    cleaned = _sanitize_filename(title).lower()
+    slug = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", cleaned).strip("-")
+    return slug or "source"
+
+
+def _title_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    name = Path(parsed.path).stem.strip()
+    return name or parsed.netloc or "source"
+
+
+def _summarize_source_text(text: str) -> str:
+    compact = re.sub(r"\s+", " ", text.strip())
+    if not compact:
+        return ""
+    sentence = compact.split(". ", 1)[0]
+    sentence = sentence.split("。", 1)[0]
+    summary = sentence.strip()
+    if len(summary) > 220:
+        return summary[:217].rstrip() + "..."
+    return summary or compact[:220]
+
+
+def _judgment_for_url(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    high_markers = ("nature.com", "science.org", "arxiv.org", ".gov", ".edu", "openai.com", "mit.edu")
+    if any(marker in host for marker in high_markers):
+        return "high"
+    medium_markers = ("wikipedia.org", "pubmed.ncbi.nlm.nih.gov", "biorxiv.org")
+    if any(marker in host for marker in medium_markers):
+        return "medium"
+    return "medium"
 
 
 def _validate_todo_closure_attempts(text: str) -> list[str]:
@@ -948,8 +1353,138 @@ def _has_closure_field(lines: list[str], cn_key: str, en_key: str) -> bool:
     return False
 
 
+def _ensure_memory_file(workspace_root: Path) -> None:
+    path = workspace_root / "Memory.md"
+    if path.exists():
+        return
+    path.write_text(_default_memory_markdown(), encoding="utf-8")
+
+
+def _default_memory_markdown() -> str:
+    return (
+        "# Workspace Memory\n\n"
+        "- `todo.md`: 唯一任务控制面板。开始新一轮工作前先读取；出现实质推进后优先更新。\n"
+        "- `research/source_index.md`: 已采纳来源表。先看这里判断哪些来源值得继续深读。\n"
+        "- `research/raw/`: 深读后落下的原始材料。长文优先按路径回读，不要依赖聊天摘要。\n"
+        "- `research/notes/`: 按主题整理的研究笔记。\n"
+        "- `research/evidence/`: 按 claim 整理的证据记录。\n"
+        "- `writing/drafts/`: 分节草稿。\n"
+        "- `research/report.md`: 最终整合报告。\n\n"
+        "## 工作约定\n\n"
+        "- 优先用 `todo_manage` 维护 `todo.md`，需要精细编辑时再用 `fs_write` / `fs_patch`。\n"
+        "- 优先用 `fs_read` 按路径读取已有文件，再决定是否继续搜索或深读。\n"
+        "- 搜索工具负责发现并采纳来源；阅读工具负责补全 `research/raw/`。\n"
+    )
+
+
+def _render_todo_template(*, title: str, goal: str, tasks: list[str]) -> str:
+    task_lines = "\n".join(f"- [ ] open: {item}" for item in tasks) or "- [ ] open: 补充任务"
+    return (
+        f"# {title}\n\n"
+        "## 目标\n"
+        f"{goal}\n\n"
+        "## 任务列表\n\n"
+        f"{task_lines}\n"
+    )
+
+
+def _todo_add_item(text: str, *, item_text: str, position: str, after_text: str) -> str:
+    new_line = f"- [ ] open: {item_text}"
+    lines = text.splitlines()
+    task_line_indexes = [index for index, line in enumerate(lines) if _is_todo_item_line(line)]
+    if position == "top":
+        if task_line_indexes:
+            lines.insert(task_line_indexes[0], new_line)
+        else:
+            lines.extend(["", "## 任务列表", "", new_line])
+        return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    if position == "after":
+        for index, line in enumerate(lines):
+            if after_text and after_text in line and _is_todo_item_line(line):
+                lines.insert(index + 1, new_line)
+                return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+        raise ValueError(f"Could not find TODO item containing: {after_text}")
+
+    if task_line_indexes:
+        insert_at = task_line_indexes[-1] + 1
+        while insert_at < len(lines) and lines[insert_at].startswith("  - "):
+            insert_at += 1
+        lines.insert(insert_at, new_line)
+    else:
+        lines.extend(["", "## 任务列表", "", new_line])
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _todo_edit_item(text: str, *, target_text: str, new_text: str) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if _is_todo_item_line(line) and target_text in line:
+            prefix, _, _ = line.partition(":")
+            lines[index] = f"{prefix}: {new_text}"
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    raise ValueError(f"Could not find TODO item containing: {target_text}")
+
+
+def _todo_set_status(text: str, *, target_text: str, status: str) -> str:
+    lines = text.splitlines()
+    checkbox = "x" if status == "closed" else " "
+    for index, line in enumerate(lines):
+        if _is_todo_item_line(line) and target_text in line:
+            _, _, description = line.partition(":")
+            lines[index] = f"- [{checkbox}] {status}: {description.strip()}"
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    raise ValueError(f"Could not find TODO item containing: {target_text}")
+
+
+def _todo_delete_item(text: str, *, target_text: str) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if _is_todo_item_line(line) and target_text in line:
+            del lines[index]
+            while index < len(lines) and lines[index].startswith("  - "):
+                del lines[index]
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    raise ValueError(f"Could not find TODO item containing: {target_text}")
+
+
+def _todo_append_closure(
+    text: str,
+    *,
+    target_text: str,
+    conclusion: str,
+    evidence: str,
+    open_items: str,
+) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if _is_todo_item_line(line) and target_text in line:
+            insert_at = index + 1
+            while insert_at < len(lines) and lines[insert_at].startswith("  - "):
+                insert_at += 1
+            lines[insert_at:insert_at] = [
+                f"  - 结论：{conclusion}",
+                f"  - 依据：{evidence}",
+                f"  - 未决项：{open_items or '-'}",
+            ]
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    raise ValueError(f"Could not find TODO item containing: {target_text}")
+
+
+def _is_todo_item_line(line: str) -> bool:
+    return bool(re.match(r"^- \[[ x]\] [a-z_]+:", line.strip()))
+
+
+def _resolve_firecrawl_api_key() -> str | None:
+    return (
+        os.getenv("FIRECRAWL_API_KEY")
+        or os.getenv("FIRECRAW_API_KEY")
+        or os.getenv("firecraw_api_key")
+    )
+
+
 def _firecrawl_scrape_fallback(
     *,
+    workspace_root: Path,
     url: str,
     firecrawl_api_key: str,
     http_client: httpx.Client,
@@ -972,6 +1507,14 @@ def _firecrawl_scrape_fallback(
     data = payload.get("data", payload)
     content = data.get("markdown") or ""
     title = data.get("metadata", {}).get("title") or data.get("title")
+    archived = _archive_source_content(
+        workspace_root=workspace_root,
+        title=title or url,
+        url=url,
+        content=content,
+        source_type="web",
+        summary_hint=content,
+    )
     return {
         "title": title,
         "url": url,
@@ -980,4 +1523,5 @@ def _firecrawl_scrape_fallback(
         "images": data.get("images", []),
         "provider": "firecrawl_fallback",
         "fallback_reason": f"{type(jina_error).__name__}: {jina_error}",
+        **archived,
     }

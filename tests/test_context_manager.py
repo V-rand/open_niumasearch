@@ -25,36 +25,52 @@ def test_context_manager_builds_markdown_context_pack(tmp_path, is_fast_mode: bo
     if is_fast_mode:
         pass
 
-    research_dir = tmp_path / "research"
-    notes_dir = research_dir / "notes"
-    evidence_dir = research_dir / "evidence"
-    checkpoints_dir = research_dir / "checkpoints"
-    notes_dir.mkdir(parents=True, exist_ok=True)
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
-
-    (research_dir / "todo.md").write_text(
-        "# Demo TODO\n\n## 任务列表\n\n- [ ] in_progress: 校验 2024 数据口径差异\n- [ ] open: 补充官方来源\n",
+    (tmp_path / "Memory.md").write_text(
+        "# Workspace Memory\n\n- `todo.md`: 统一任务控制面板\n- `research/source_index.md`: 来源索引\n- `research/raw/`: 原始材料\n",
         encoding="utf-8",
     )
-    (research_dir / "source_index.md").write_text(
-        "# Source Index\n\n- source_1 | official report | in_progress\n",
-        encoding="utf-8",
-    )
-    (notes_dir / "note_1.md").write_text("# Note\n\n关键结论 A", encoding="utf-8")
-    (evidence_dir / "evidence_1.md").write_text("# Evidence\n\nclaim: A", encoding="utf-8")
-    (checkpoints_dir / "cp_1.md").write_text("# Checkpoint\n\n未解决项：口径统一", encoding="utf-8")
 
     manager = ContextManager(workspace_root=tmp_path)
     manager.record_tool_observation("web_search", '{"query":"A","results":[{"title":"t"}]}', is_error=False)
     payload = manager.build_context_payload(user_input="请继续研究")
 
-    assert "当前阶段" in payload
-    assert "in_progress: 校验 2024 数据口径差异" in payload
-    assert "source_1" in payload
-    assert "关键结论 A" in payload
-    assert "未解决项" in payload
+    assert "当前任务" in payload
+    assert "## Workspace Memory" in payload
+    assert "`todo.md`" in payload
+    assert "`research/source_index.md`" in payload
     assert "web_search" in payload
+
+
+def test_context_manager_summarizes_long_observation_by_path_and_url(tmp_path, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    manager = ContextManager(workspace_root=tmp_path)
+    manager.record_tool_observation(
+        "pdf_read_url",
+        '{"source_url":"https://example.com/demo.pdf","markdown_path":"documents/demo.md","markdown_preview":"'
+        + ("x" * 1200)
+        + '"}',
+        is_error=False,
+    )
+    pack = manager.build_context_pack(user_input="请继续推进")
+
+    assert "documents/demo.md" in pack.rendered_prompt
+    assert "https://example.com/demo.pdf" in pack.rendered_prompt
+    assert "markdown_preview" not in pack.rendered_prompt
+
+
+def test_context_manager_reminds_when_todo_is_not_updated(tmp_path, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    (tmp_path / "Memory.md").write_text("# Workspace Memory\n\n- `todo.md`\n", encoding="utf-8")
+    manager = ContextManager(workspace_root=tmp_path)
+    manager.record_turn_progress(used_tools=True, updated_todo=False)
+
+    pack = manager.build_context_pack(user_input="继续")
+
+    assert "未更新 todo.md" in pack.rendered_prompt
 
 
 def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_fast_mode: bool) -> None:
@@ -104,7 +120,7 @@ def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_f
     assert len(first_call) == 2
     assert first_call[0]["role"] == "system"
     assert first_call[1]["role"] == "user"
-    assert "上下文包" in str(first_call[1]["content"])
+    assert "工作上下文" in str(first_call[1]["content"])
 
     # second call still has compact messages and should not replay full raw tool payload history.
     assert len(second_call) <= 4
@@ -114,4 +130,3 @@ def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_f
     events = [json.loads(line) for line in (logger.run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     event_types = [event["event_type"] for event in events]
     assert "context_pack_built" in event_types
-
