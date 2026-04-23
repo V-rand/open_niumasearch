@@ -1,5 +1,44 @@
 # CHANGELOG
 
+## 2026-04-23 (by Codex) — 上下文策略回收：连续对话优先，任务落文件，后续只给增量提示
+
+### 本轮目标
+
+- 降低每轮重打包 `context_prompt` 对语义连续性和缓存友好性的破坏
+- 把原始长任务从“每轮重复注入”改成“首轮落文件，后续按需读取”
+- 让 agent 更依赖连续对话尾部和文件工作流，而不是每轮重读一个大摘要包
+
+### 核心变更
+
+#### 1. `ContextManager` 改成“首轮引导 + 后续增量”
+- `src/deep_research_agent/context_manager.py`
+  - 首轮自动把原始用户任务写入 `task.md`
+  - 第 1 轮上下文改为启动引导：
+    - 原始任务已保存到 `task.md`
+    - 优先建立 `todo.md` 和工作面
+    - 原始任务只给短预览，不再把整段长任务设计成后续每轮固定块
+  - 第 2 轮及以后改为增量提示：
+    - 明确要求延续上一轮工作，不要重启任务
+    - 提醒原始任务在 `task.md`、计划在 `todo.md`
+    - 只补充提醒、最近工作区变化和最近工具观察
+
+#### 2. 连续性优先于“全量摘要”
+- 后续回合不再每轮重放完整用户输入和完整 `todo.md`
+- agent 需要细节时，应主动读取 `task.md`、`todo.md` 和研究文件
+- 这样更接近“连续工作流驱动”，而不是“每轮摘要驱动”
+
+#### 3. 测试同步
+- `tests/test_context_manager.py`
+  - 更新为校验首轮 `task.md` 引导
+  - 更新为校验后续回合使用“增量工作提示”
+- `tests/test_agent_loop.py`
+  - 继续验证 agent 在压缩历史下保持基本主循环行为
+
+### 验证结果
+
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_context_manager.py tests/test_agent_loop.py -q --fast`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/ -q --fast`：通过
+
 ## 2026-04-23 (by Codex) — Prompt / TODO Skill 方法论重写：目标必须绑定可验证产出
 
 ### 本轮目标

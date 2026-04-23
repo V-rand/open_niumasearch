@@ -88,12 +88,9 @@ class ContextManager:
         turn_index: int | None = None,
         max_turns: int | None = None,
     ) -> ContextPack:
-        # 1. Read the real todo.md
+        self._ensure_task_file(user_input)
         todo_text = self._read_text("todo.md") or "- 暂无 todo.md，请尽快初始化它。"
-        
-        # 2. Optimized Workspace Map: Only show last 5 modifications
         recent_files = self._build_recent_workspace_map()
-
         observations_summary = "\n".join(self._recent_observations) if self._recent_observations else "- 暂无最近工具观察"
         todo_reminder = self._build_todo_reminder()
 
@@ -109,20 +106,44 @@ class ContextManager:
             "observations_summary": observations_summary,
             "raw_sources": "",
         }
-        
-        rendered = (
-            "--- 核心任务锚点 (STRICT ADHERENCE REQUIRED) ---\n"
-            f"{sections['input_task']}\n"
-            "--------------------------------------------\n\n"
-            f"## 当前进度 (todo.md)\n{sections['todo_slice']}\n\n"
-            f"## 工作区最近动态 (Recent Changes)\n{sections['notes_summary']}\n\n"
-            f"## 关键提醒\n{sections['sources_summary']}\n\n"
-            f"## 最近工具观察\n{sections['observations_summary']}\n\n"
-            "**行动准则**：\n"
-            "1. 严禁重复阅读相同 URL。\n"
-            "2. 每一条笔记必须包含 [原文引用] 和 [冲突与互补]。\n"
-            "3. 任何实质进展必须立即更新 todo.md。"
-        )
+
+        task_preview = self._compact_text(user_input.strip(), max_chars=280)
+        if turn_index in (None, 1):
+            rendered = (
+                "## 启动工作\n"
+                "- 原始任务已保存到 `task.md`。\n"
+                "- 当前回合先建立工作面：优先读取或创建 `todo.md`，需要时创建 `research/source_index.md` 与相关研究文件。\n"
+                "- 如果任务复杂，不要试图一次做完；先形成一个当前可闭合的小目标。\n\n"
+                "## 原始任务预览\n"
+                f"{task_preview}\n\n"
+                "## 当前进度 (todo.md)\n"
+                f"{sections['todo_slice']}\n\n"
+                "## 工作区状态\n"
+                f"{sections['notes_summary']}\n\n"
+                "## 提醒\n"
+                f"{sections['sources_summary']}\n\n"
+                "**行动准则**：\n"
+                "1. 原始任务在 `task.md`，后续优先延续已有工作，不要每轮重启任务。\n"
+                "2. 重要状态保存在文件里，需要时主动读取，不要依赖这条消息重复展开全部上下文。\n"
+                "3. 任何实质进展必须落到可验证产出。"
+            )
+        else:
+            rendered = (
+                "## 增量工作提示\n"
+                "- 延续上一轮工作，不要重启任务。\n"
+                "- 原始任务全文在 `task.md`；当前计划在 `todo.md`；来源索引在 `research/source_index.md`。\n"
+                "- 需要细节时主动读取文件，不要指望这一轮提示重述全部背景。\n\n"
+                "## 当前提醒\n"
+                f"{sections['sources_summary']}\n\n"
+                "## 最近工作区变化\n"
+                f"{sections['notes_summary']}\n\n"
+                "## 最近工具观察\n"
+                f"{sections['observations_summary']}\n\n"
+                "**行动准则**：\n"
+                "1. 优先围绕当前目标形成可验证产出，而不是继续泛化搜索。\n"
+                "2. 如果需要计划或约束，直接读取 `todo.md` 和 `task.md`。\n"
+                "3. 保持对上一轮对话和工具结果的连续延续。"
+            )
         
         token_count = self.estimate_tokens(rendered)
         
@@ -140,6 +161,12 @@ class ContextManager:
             token_count=token_count,
             trimmed_blocks=[],
         )
+
+    def _ensure_task_file(self, user_input: str) -> None:
+        path = self.workspace_root / "task.md"
+        if path.exists():
+            return
+        path.write_text(user_input.strip() + "\n", encoding="utf-8")
 
     def _build_recent_workspace_map(self) -> str:
         """Build a very compact list of the last 5 modified files."""

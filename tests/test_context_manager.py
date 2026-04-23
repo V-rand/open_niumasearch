@@ -31,10 +31,11 @@ def test_context_manager_builds_markdown_context_pack(tmp_path, is_fast_mode: bo
     manager.record_tool_observation("web_search", '{"query":"A","results":[{"title":"t"}]}', is_error=False)
     payload = manager.build_context_payload(user_input="请继续研究")
 
-    assert "核心任务锚点" in payload
+    assert "启动工作" in payload
+    assert "`task.md`" in payload
     assert "## 当前进度 (todo.md)" in payload
     assert "建立初始任务列表" in payload
-    assert "web_search" in payload
+    assert (tmp_path / "task.md").exists()
 
 
 def test_context_manager_summarizes_long_observation_by_path_and_url(tmp_path, is_fast_mode: bool) -> None:
@@ -49,11 +50,12 @@ def test_context_manager_summarizes_long_observation_by_path_and_url(tmp_path, i
         + '"}',
         is_error=False,
     )
-    pack = manager.build_context_pack(user_input="请继续推进")
+    pack = manager.build_context_pack(user_input="请继续推进", turn_index=2)
 
     assert "documents/demo.md" in pack.rendered_prompt
     assert "https://example.com/demo.pdf" in pack.rendered_prompt
     assert "markdown_preview" not in pack.rendered_prompt
+    assert "增量工作提示" in pack.rendered_prompt
 
 
 def test_context_manager_reminds_when_todo_is_not_updated(tmp_path, is_fast_mode: bool) -> None:
@@ -115,12 +117,15 @@ def test_react_agent_uses_context_manager_instead_of_full_history(tmp_path, is_f
     assert len(first_call) == 2
     assert first_call[0]["role"] == "system"
     assert first_call[1]["role"] == "user"
-    assert "核心任务锚点" in str(first_call[1]["content"])
+    assert "启动工作" in str(first_call[1]["content"])
+    assert "task.md" in str(first_call[1]["content"])
 
     # second call still has compact messages and should not replay full raw tool payload history.
     assert len(second_call) <= 4
     assert second_call[0]["role"] == "system"
     assert second_call[1]["role"] == "user"
+    assert "增量工作提示" in str(second_call[1]["content"])
+    assert "say hello" not in str(second_call[1]["content"])
 
     events = [json.loads(line) for line in (logger.run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     event_types = [event["event_type"] for event in events]
