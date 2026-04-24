@@ -570,7 +570,7 @@ def build_builtin_tools(
     registry.register(
         ToolDefinition(
             name="web_search",
-            description="Search the web with Tavily. Returns a list of results, each containing title, URL, and a content snippet (summary, not full text). For key claims that need verification or evidence, use jina_reader or pdf_read_url to read the full page content. Start broad, then narrow if needed. If you already know which results are worth keeping, pass keep_result_indices to add them into research/source_index.md.",
+            description="Search the web with Tavily. Returns a list of results, each containing title, URL, and a content snippet (summary, not full text). For key claims that need verification or evidence, use jina_reader or pdf_read_url to read the full page content. Start broad, then narrow if needed. If you already know which results are worth keeping, pass keep_result_indices to add them into research/leads.md.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -642,7 +642,7 @@ def build_builtin_tools(
     registry.register(
         ToolDefinition(
             name="arxiv_search",
-            description="Search arXiv papers by query using the arXiv API. Use this instead of generic web search when the target is clearly an arXiv paper or topic. If you already know which results are worth keeping, pass keep_result_indices to add them into research/source_index.md.",
+            description="Search arXiv papers by query using the arXiv API. Use this instead of generic web search when the target is clearly an arXiv paper or topic. If you already know which results are worth keeping, pass keep_result_indices to add them into research/leads.md.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -692,6 +692,106 @@ def build_builtin_tools(
                 "required": ["url"],
             },
             handler=pdf_read_url,
+        )
+    )
+    return registry
+
+
+def build_readonly_tools(workspace_root: Path) -> ToolRegistry:
+    """Build the evaluator-safe tool set.
+
+    Evaluators inspect generator artifacts but must not mutate the workspace.
+    """
+    registry = ToolRegistry()
+    workspace_root = Path(workspace_root).resolve()
+
+    def resolve_path(raw_path: str) -> Path:
+        path = (workspace_root / raw_path).resolve()
+        if path != workspace_root and workspace_root not in path.parents:
+            raise ValueError(f"Path escapes workspace root: {raw_path}")
+        return path
+
+    def fs_list(arguments: dict[str, Any]) -> list[dict[str, Any]]:
+        root = resolve_path(arguments.get("path", "."))
+        recursive = bool(arguments.get("recursive", False))
+        max_depth = arguments.get("max_depth")
+        include_hidden = bool(arguments.get("include_hidden", False))
+        kind = arguments.get("kind", "all")
+
+        if not root.exists():
+            raise FileNotFoundError(f"Path does not exist: {root}")
+
+        entries: list[dict[str, Any]] = []
+        iterator = root.rglob("*") if recursive else root.iterdir()
+        base_depth = len(root.parts)
+
+        for entry in iterator:
+            relative = entry.relative_to(workspace_root)
+            if not include_hidden and any(part.startswith(".") for part in relative.parts):
+                continue
+            if max_depth is not None and len(entry.parts) - base_depth > int(max_depth):
+                continue
+            if kind == "file" and not entry.is_file():
+                continue
+            if kind == "dir" and not entry.is_dir():
+                continue
+            entries.append(
+                {
+                    "path": str(relative),
+                    "kind": "dir" if entry.is_dir() else "file",
+                    "size": entry.stat().st_size,
+                }
+            )
+        return entries
+
+    def fs_read(arguments: dict[str, Any]) -> str:
+        path = resolve_path(arguments["path"])
+        text = path.read_text(encoding="utf-8")
+        start_line = arguments.get("start_line")
+        end_line = arguments.get("end_line")
+        if start_line is not None or end_line is not None:
+            lines = text.splitlines()
+            start = max(int(start_line or 1) - 1, 0)
+            end = int(end_line) if end_line is not None else len(lines)
+            text = "\n".join(lines[start:end])
+        max_chars = arguments.get("max_chars")
+        if max_chars is not None:
+            text = text[: int(max_chars)]
+        return text
+
+    registry.register(
+        ToolDefinition(
+            name="fs_list",
+            description="List files and directories within the workspace.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "recursive": {"type": "boolean"},
+                    "max_depth": {"type": "integer"},
+                    "include_hidden": {"type": "boolean"},
+                    "kind": {"type": "string", "enum": ["all", "file", "dir"]},
+                },
+                "required": [],
+            },
+            handler=fs_list,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="fs_read",
+            description="Read a text file from the workspace.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "max_chars": {"type": "integer"},
+                },
+                "required": ["path"],
+            },
+            handler=fs_read,
         )
     )
     return registry
@@ -1001,6 +1101,37 @@ def _suggest_pdf_filename(url: str) -> str:
     return candidate
 
 
+def _leads_path(workspace_root: Path) -> Path:
+    return workspace_root / "research" / "leads.md"
+
+
+def _upsert_leads(*, workspace_root: Path, entry: dict[str, Any]) -> None:
+    leads_path = _leads_path(workspace_root)
+    leads_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # We will append to leads.md if not present. A simple list of markdown links with descriptions.
+    content = ""
+    if leads_path.exists():
+        content = leads_path.read_text(encoding="utf-8")
+        if entry["url"] in content:
+            return  # Already in leads
+            
+    title = entry.get("title", "Untitled")
+    url = entry.get("url", "")
+    summary = entry.get("summary", "")
+    why_keep = entry.get("why_keep", "")
+    
+    new_entry = f"### {title}\n- **URL**: {url}\n- **Summary**: {summary}\n"
+    if why_keep:
+        new_entry += f"- **Reason**: {why_keep}\n"
+    new_entry += "- **Status**: `[Unread]`\n\n"
+    
+    with leads_path.open("a", encoding="utf-8") as f:
+        if not content:
+            f.write("# Research Leads\n\n")
+        f.write(new_entry)
+
+
 def _keep_selected_search_results(
     *,
     workspace_root: Path,
@@ -1029,7 +1160,7 @@ def _keep_selected_search_results(
             note_paths=[],
             why_keep=str(keep_reason or ""),
         )
-        _upsert_source_index(workspace_root=workspace_root, entry=entry)
+        _upsert_leads(workspace_root=workspace_root, entry=entry)
         kept_sources.append(
             {
                 "index": index + 1,

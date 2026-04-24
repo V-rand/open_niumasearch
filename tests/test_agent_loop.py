@@ -16,7 +16,7 @@ class FakeModelBackend:
         self.kwargs_history: list[dict[str, object]] = []
 
     def complete(self, messages: list[dict[str, object]], **kwargs: object) -> AssistantResponse:
-        self.calls.append(messages)
+        self.calls.append([dict(message) for message in messages])
         self.kwargs_history.append(dict(kwargs))
         if not self._responses:
             raise AssertionError("No fake responses remaining")
@@ -219,6 +219,46 @@ def test_messages_grow_naturally_without_truncation(tmp_path, is_fast_mode: bool
     result = agent.run(user_input="test", system_prompt="system")
 
     assert result.final_answer == "final"
-    # All messages preserved: system + user + assistant + tool + user + assistant + tool + user + assistant + tool + user + assistant
-    # = 1 + 1 + (1+1+1)*3 + 1 = 12
-    assert len(backend.calls[-1]) == 12
+    # Last model request happens before the final assistant message is appended.
+    assert len(backend.calls[-1]) == 11
+
+
+def test_react_agent_uses_configured_followup_message_after_tools(tmp_path, is_fast_mode: bool) -> None:
+    if is_fast_mode:
+        pass
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="echo_tool",
+            description="Echo.",
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+            handler=lambda arguments: {"echo": arguments["text"]},
+        )
+    )
+    backend = FakeModelBackend(
+        [
+            AssistantResponse(
+                reasoning="tool",
+                content=None,
+                tool_calls=[ToolCall(id="c1", name="echo_tool", arguments={"text": "a"})],
+            ),
+            AssistantResponse(reasoning="done", content="final", tool_calls=[]),
+        ]
+    )
+    logger = RunLogger(base_dir=tmp_path / "logs")
+    agent = ReActAgent(
+        model_backend=backend,
+        tool_registry=registry,
+        logger=logger,
+        config=AgentConfig(max_turns=2, followup_user_message="更新信念后继续。"),
+    )
+
+    agent.run(user_input="test", system_prompt="system")
+
+    second_request_messages = backend.calls[1]
+    assert second_request_messages[-1] == {"role": "user", "content": "更新信念后继续。"}

@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## 2026-04-24 (by Codex) — 两段式多 Agent 研究/写作闭环 + 任务适配验证器
+
+### 本轮目标
+
+- 把 deep research 的执行方式从单一连续 `Continue.` 循环，改成显式两段式：`RESEARCH` 认证后再启动全新的 `WRITING` agent
+- 保留 Markdown 作为主工作记忆，但让写作阶段只继承认证后的研究产物包，而不是整段研究对话历史
+- 让验证器适配任务形态：短答案不强行长文，长报告/阅读清单/实验方案才要求更完整交付
+
+### 核心变更
+
+#### 1. 多 Agent 编排
+- 新增 `deep-research-agent-multi`
+- `RESEARCH` 阶段：研究者循环 + 只读 evaluator 认证
+- `WRITING` 阶段：认证通过后启动全新的 Writer agent，Writer 只读取 `research/writer_packet.md` 和研究产物
+- 写作阶段也增加 evaluator 认证，防止把“自圆其说”从研究阶段搬到写作阶段
+
+#### 2. 任务适配的验证器
+- evaluator 不再默认要求长文
+- short-answer benchmark 可以直接通过一句话、零外部检索、零长文交付
+- 认证标准强调：
+  - 是否满足原始任务
+  - 是否有必要的证据锚定
+  - 是否适合当前交付形态
+
+#### 3. Prompt / skill 调整
+- `prompts/system.md`
+  - 改写为“实践-认识-再实践”的信念更新模型
+  - 明确交付形态必须适配任务
+- `skills/todo.md`
+  - 从线性计划表改为研究控制面板
+  - 强调信念账本、信息增益、周期更新和认证后闭合
+
+#### 4. 工具与日志
+- `src/deep_research_agent/tools.py`
+  - `keep_result_indices` 继续先写入 `research/leads.md`
+  - 新增只读 evaluator 工具集
+- `src/deep_research_agent/logging.py`
+  - 继续保留完整 trace，但兼容新的上下文字段和 TODO 更新标记
+
+#### 5. 测试更新
+- 新增多 Agent 流程测试，覆盖：
+  - research 认证后启动 fresh writer
+  - research revise 反馈会进入下一轮 research
+  - writing revise 会进入下一轮 fresh writer
+  - evaluator model 优先级
+  - readonly tools 仅暴露 `fs_list` / `fs_read`
+- 调整旧测试，删除只保护旧文案、不保护能力的断言
+
+### 验证
+
+- `pytest tests/ -q --fast`：通过
+- 真实 smoke：`deep-research-agent-multi` 在 `qwen-plus` 下可以跑通研究认证链路；短任务在 `--evaluator-max-turns` 太低时会保守地继续，提升到默认值后再复验写作进入情况
+
 ## 2026-04-23 (by Kimi) — 自然消息流 + 工具结果摘要化
 
 ### 本轮目标

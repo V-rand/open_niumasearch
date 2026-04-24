@@ -23,6 +23,7 @@ dev = [
 [project.scripts]
 deep-research-agent = "deep_research_agent.cli:main"
 deep-research-agent-eval = "deep_research_agent.eval:main"
+deep-research-agent-multi = "deep_research_agent.multi_agent:main"
 
 [tool.pytest.ini_options]
 addopts = "-q"

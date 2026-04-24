@@ -280,7 +280,7 @@ def test_web_search_uses_raw_query_without_runtime_rewrite(tmp_path, monkeypatch
     assert "query_strategy" not in payload
 
 
-def test_web_search_can_keep_selected_results_in_source_index(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
+def test_web_search_can_keep_selected_results_in_leads(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
     if is_fast_mode:
         pass
 
@@ -313,10 +313,11 @@ def test_web_search_can_keep_selected_results_in_source_index(tmp_path, monkeypa
     assert result.is_error is False
     payload = json.loads(result.content)
     assert payload["kept_sources"][0]["title"] == "Source B"
-    index_text = (tmp_path / "research" / "source_index.md").read_text(encoding="utf-8")
-    assert "Source B" in index_text
-    assert "https://b.example.com" in index_text
-    assert "用于后续深入阅读" in index_text
+    leads_text = (tmp_path / "research" / "leads.md").read_text(encoding="utf-8")
+    assert "Source B" in leads_text
+    assert "https://b.example.com" in leads_text
+    assert "用于后续深入阅读" in leads_text
+    assert "[Unread]" in leads_text
 
 
 def test_jina_reader_archives_raw_source_and_updates_source_index(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
@@ -460,7 +461,7 @@ def test_arxiv_search_returns_metadata_list(tmp_path, monkeypatch, is_fast_mode:
     assert payload["results"][0]["paper_id"] == "1706.03762"
 
 
-def test_arxiv_search_can_keep_selected_results_into_source_index(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
+def test_arxiv_search_can_keep_selected_results_into_leads(tmp_path, monkeypatch, is_fast_mode: bool) -> None:
     if is_fast_mode:
         pass
 
@@ -482,9 +483,10 @@ def test_arxiv_search_can_keep_selected_results_into_source_index(tmp_path, monk
     assert result.is_error is False
     payload = json.loads(result.content)
     assert payload["kept_sources"][0]["title"] == "Attention Is All You Need"
-    index_text = (tmp_path / "research" / "source_index.md").read_text(encoding="utf-8")
-    assert "Attention Is All You Need" in index_text
-    assert "why_keep: 原始论文，后续需要深读" in index_text
+    leads_text = (tmp_path / "research" / "leads.md").read_text(encoding="utf-8")
+    assert "Attention Is All You Need" in leads_text
+    assert "原始论文，后续需要深读" in leads_text
+    assert "[Unread]" in leads_text
 
 
 def test_pdf_read_url_falls_back_to_local_parser(tmp_path, monkeypatch, is_fast_mode: bool) -> None:

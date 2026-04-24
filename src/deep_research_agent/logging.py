@@ -145,6 +145,20 @@ class RunLogger:
         if event_type != "model_request" or not isinstance(payload, dict):
             return skipped_field_paths
 
+        context_prompt = payload.get("context_prompt")
+        if isinstance(context_prompt, str):
+            field_path = "payload.context_prompt"
+            artifact_name = self._next_artifact_name(event_type=event_type, field_path=field_path)
+            self.write_text_artifact(artifact_name, context_prompt)
+            artifacts.append(
+                {
+                    "field_path": field_path,
+                    "artifact_path": artifact_name,
+                    "char_count": len(context_prompt),
+                }
+            )
+            skipped_field_paths.add(field_path)
+
         messages = payload.get("messages")
         if not isinstance(messages, list):
             return skipped_field_paths
@@ -321,14 +335,21 @@ class RunLogger:
         tool_names = payload.get("tool_names")
         effective_tool_choice = payload.get("effective_tool_choice")
 
-        lines.append("**思考输入 (Summary)**")
+        lines.append("**思考输入** (Summary)")
         if message_count is not None:
             lines.append(f"- 消息总数: `{message_count}`")
+        input_tokens_estimated = payload.get("input_tokens_estimated")
+        if input_tokens_estimated is not None:
+            lines.append(f"- 估算输入 Token: `{input_tokens_estimated}`")
         if isinstance(tool_names, list) and tool_names:
             tools_text = ", ".join(f"`{name}`" for name in tool_names)
             lines.append(f"- 可用工具: {tools_text}")
         if effective_tool_choice is not None:
             lines.append(f"- 工具策略: `{effective_tool_choice}`")
+        context_prompt = payload.get("context_prompt")
+        if context_prompt:
+            lines.append(self._compact_preview(str(context_prompt), max_lines=20))
+            lines.append("")
         
         if conversation_summary:
             lines.append(self._compact_preview(self._render_value(conversation_summary), max_lines=20))
@@ -346,6 +367,23 @@ class RunLogger:
         lines = ["**观察**", f"- `{tool_name}` | `{status}`"]
 
         if tool_arguments not in (None, {}, []):
+            # Special highlighting for todo.md modifications
+            if tool_name in {"fs_write", "fs_patch"} and isinstance(tool_arguments, dict):
+                path = tool_arguments.get("path", "")
+                if path.endswith("todo.md") and not is_error:
+                    lines.append("\n> **🚀 【计划变更 (PLAN UPDATE)】**")
+                    if tool_name == "fs_write":
+                        todo_content = tool_arguments.get("content", "")
+                        lines.append("> 目标与计划已被更新：")
+                        lines.append(self._compact_preview(todo_content, max_lines=30))
+                    elif tool_name == "fs_patch":
+                        op = tool_arguments.get("operation")
+                        target = tool_arguments.get("target")
+                        patch_content = tool_arguments.get("content")
+                        lines.append(f"> 进行了局部修改 ({op})：")
+                        lines.append(f"> Target: `{target}`")
+                        lines.append(f"> Content: `{patch_content}`\n")
+            
             lines.append("  指令:")
             lines.append(self._compact_preview(self._render_arguments_block(tool_arguments), max_lines=12))
 

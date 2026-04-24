@@ -32,6 +32,7 @@ class AgentConfig:
     parallel_tool_calls: bool = True
     tool_choice: str | dict[str, Any] = "auto"
     max_parallel_tools: int = 4
+    followup_user_message: str = "Continue."
 
 
 class ReActAgent:
@@ -155,9 +156,7 @@ class ReActAgent:
                         }
                     )
                 # After tool results, add a light user message to prompt next thinking
-                messages.append(
-                    {"role": "user", "content": "Continue."}
-                )
+                messages.append({"role": "user", "content": self.config.followup_user_message})
                 continue
 
             if response.content:
