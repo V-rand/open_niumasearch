@@ -69,7 +69,7 @@ class ReActAgent:
             {"role": "system", "content": system_prompt},
         ]
 
-        # First user message: task + light guidance
+        # First user message: task wrapped in XML
         first_user_content = self._build_first_user_message(user_input)
         messages.append({"role": "user", "content": first_user_content})
 
@@ -150,7 +150,7 @@ class ReActAgent:
                         {
                             "role": "tool",
                             "tool_call_id": result.call_id,
-                            "content": result.content,
+                            "content": f"<observation>\n{result.content}\n</observation>",
                         }
                     )
                 # After tool results, add a light user message to prompt next thinking
@@ -183,15 +183,8 @@ class ReActAgent:
         )
 
     def _build_first_user_message(self, user_input: str) -> str:
-        """Build the first user message with task + light guidance."""
-        self.context_manager.ensure_task_file(user_input)
-        return (
-            f"{user_input.strip()}\n\n"
-            "---\n"
-            "Start by reading or creating `todo.md` to plan your work. "
-            "Use files to persist state and progress. "
-            "When you need context from previous work, read the relevant files."
-        )
+        """Build the first user message with task wrapped in XML."""
+        return f"<task>\n{user_input.strip()}\n</task>"
 
     def _dispatch_tool_calls(self, tool_calls: list[ToolCall]) -> list[ToolExecutionResult]:
         if not self.config.parallel_tool_calls:
