@@ -100,6 +100,7 @@ class ReActAgent:
                     "skill_paths": normalized_skill_paths,
                     "message_count": len(messages),
                     "conversation_summary": _summarize_messages_for_log(messages),
+                    "messages": messages,
                     "tool_names": self.tool_registry.tool_names(),
                     "effective_tool_choice": effective_tool_choice,
                 },

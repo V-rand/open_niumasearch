@@ -145,23 +145,13 @@ class RunLogger:
         if event_type != "model_request" or not isinstance(payload, dict):
             return skipped_field_paths
 
-        context_prompt = payload.get("context_prompt")
-        if not isinstance(context_prompt, str) or not context_prompt:
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
             return skipped_field_paths
 
-        skipped_field_paths.add("payload.context_prompt")
-        artifact_name = self._next_artifact_name(
-            event_type=event_type,
-            field_path="payload.context_prompt",
-        )
-        self.write_text_artifact(artifact_name, context_prompt)
-        artifacts.append(
-            {
-                "field_path": "payload.context_prompt",
-                "artifact_path": artifact_name,
-                "char_count": len(context_prompt),
-            }
-        )
+        # We keep messages in payload for walk-based artifact collection if they are small,
+        # but if the whole list is large, we might want to skip it and save it as a dedicated artifact.
+        # For now, let's just let the walker handle individual large strings in messages.
         return skipped_field_paths
 
     # ------------------------------------------------------------------
@@ -326,27 +316,22 @@ class RunLogger:
 
     def _trace_model_request(self, payload: dict[str, Any]) -> list[str]:
         lines: list[str] = []
-        context_prompt = payload.get("context_prompt")
-        input_tokens_estimated = payload.get("input_tokens_estimated")
+        conversation_summary = payload.get("conversation_summary")
+        message_count = payload.get("message_count")
         tool_names = payload.get("tool_names")
         effective_tool_choice = payload.get("effective_tool_choice")
 
-        if context_prompt:
-            lines.append("**思考输入**")
-            if input_tokens_estimated is not None:
-                lines.append(f"- 估算输入 Token: `{input_tokens_estimated}`")
-            if isinstance(tool_names, list) and tool_names:
-                tools_text = ", ".join(f"`{name}`" for name in tool_names)
-                lines.append(f"- 可用工具: {tools_text}")
-            if effective_tool_choice is not None:
-                lines.append(f"- 工具策略: `{effective_tool_choice}`")
-            lines.append(self._compact_preview(str(context_prompt), max_lines=18))
-            lines.append("")
-
-        conversation_tail = payload.get("conversation_tail")
-        if isinstance(conversation_tail, list) and conversation_tail:
-            lines.append("**最近对话尾部**")
-            lines.append(self._compact_preview(self._render_value(conversation_tail), max_lines=8))
+        lines.append("**思考输入 (Summary)**")
+        if message_count is not None:
+            lines.append(f"- 消息总数: `{message_count}`")
+        if isinstance(tool_names, list) and tool_names:
+            tools_text = ", ".join(f"`{name}`" for name in tool_names)
+            lines.append(f"- 可用工具: {tools_text}")
+        if effective_tool_choice is not None:
+            lines.append(f"- 工具策略: `{effective_tool_choice}`")
+        
+        if conversation_summary:
+            lines.append(self._compact_preview(self._render_value(conversation_summary), max_lines=20))
             lines.append("")
 
         return lines
