@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from deep_research_agent.agent import AgentConfig, ReActAgent
+from deep_research_agent.dashscope_backend import DashScopeOpenAIBackend
+from deep_research_agent.logging import RunLogger
+from deep_research_agent.session import create_session
+from deep_research_agent.prompts import compose_system_prompt, get_system_prompt
+from deep_research_agent.skills import load_repo_skills
+
+
+def main() -> None:
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    parser = argparse.ArgumentParser(description="Minimal Deep Research Agent harness")
+    parser.add_argument("user_input", help="The user request for the agent.")
+    parser.add_argument(
+        "--sessions-dir",
+        default="sessions",
+        help="Directory where isolated task sessions are created.",
+    )
+    parser.add_argument(
+        "--session-id",
+        help="Optional existing session id to reuse.",
+    )
+    parser.add_argument(
+        "--system-prompt-file",
+        help="Optional file containing the system prompt.",
+    )
+    parser.add_argument(
+        "--skill",
+        action="append",
+        default=[],
+        help="Repo-local skill name under skills/<name>.md. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=6,
+        help="Maximum model turns before stopping.",
+    )
+    args = parser.parse_args()
+
+    sessions_dir = Path(args.sessions_dir).resolve()
+    session = create_session(
+        sessions_dir,
+        user_input=args.user_input,
+        session_id=args.session_id,
+    )
+    base_system_prompt = (
+        Path(args.system_prompt_file).read_text(encoding="utf-8")
+        if args.system_prompt_file
+        else get_system_prompt()
+    )
+    loaded_skills = load_repo_skills(args.skill) if args.skill else []
+    backend = DashScopeOpenAIBackend()
+    # Tools
+    tools = None
+    try:
+        from deep_research_agent.tools import build_builtin_tools
+        tools = build_builtin_tools(
+            workspace_root=session.workspace_dir,
+            model_backend=backend
+        )
+        print("✅ Tools loaded successfully.")
+    except (ImportError, ModuleNotFoundError) as e:
+        print(f"⚠️ Tools package not found or failed to load: {e}. Running in brain-only mode.")
+    except Exception as e:
+        print(f"❌ Error loading tools: {e}. Running in brain-only mode.")
+
+    system_prompt = compose_system_prompt(base_system_prompt, tools=tools.to_openai_tools() if tools else [])
+    for skill in loaded_skills:
+        system_prompt += f"\n\n## Skill: {skill.name}\n\n{skill.content.rstrip()}\n"
+    logger = RunLogger(base_dir=session.logs_dir)
+    agent = ReActAgent(
+        model_backend=backend,
+        tool_registry=tools,
+        logger=logger,
+        config=AgentConfig(max_turns=args.max_turns),
+        workspace_root=session.workspace_dir,
+    )
+
+    result = agent.run(
+        user_input=args.user_input,
+        system_prompt=system_prompt,
+        skill_paths=[str(skill.path) for skill in loaded_skills],
+    )
+    print(f"session_id={session.session_id}")
+    print(f"session_dir={session.session_dir}")
+    print(f"workspace_dir={session.workspace_dir}")
+    if loaded_skills:
+        print(f"skills={','.join(skill.name for skill in loaded_skills)}")
+    print(f"stop_reason={result.stop_reason}")
+    print(f"turn_count={result.turn_count}")
+    print(f"run_dir={result.run_dir}")
+    if result.final_answer:
+        print(result.final_answer)
+
+
+if __name__ == "__main__":
+    main()
